@@ -307,6 +307,73 @@ class BaseDataConfigFactory(DataConfig, upstream_config.DataConfigFactory, abc.A
 
 
 @dataclasses.dataclass(frozen=True)
+class BridgeECoTDataConfig(BaseDataConfigFactory):
+    """Config for cascade-VLA pretraining on Bridge V2 + Embodied-CoT annotations.
+
+    This config uses the JSON-based ``Embodied-CoT/embodied_features_bridge`` dataset,
+    paired with an external Bridge V2 image source (see :mod:`lap.datasets.bridge_ecot_dataset`).
+
+    Pretraining target: expert-0 only (no action diffusion). Set
+    ``LAPConfig.enable_action_training=False`` to train just the language CE loss
+    on ``[think]<subtask_reason>[action]<subtask>``.
+
+    NOTE: this config currently only sets up the data-side scaffolding. To launch
+    actual training, you must:
+      1. Plug a real ``BridgeV2ImageLoader`` into the dataloader factory
+         (the default ``NullImageLoader`` returns black frames — useful for
+         pipeline plumbing only).
+      2. Wire ``BridgeECoTDataset`` into ``data_loader.create_data_loader``
+         (currently the data path is RLDS-only). See
+         ``cascade-bridge-pretraining-discussion.md`` §6 for the recommended
+         integration approach.
+    """
+
+    # Identifiers (used for asset paths, wandb tags, etc.).
+    repo_id: str = "bridge_ecot"
+    asset_id: str = "bridge_ecot"
+
+    # ECoT JSON path (HF cache layout).
+    ecot_json_path: str = (
+        "~/.cache/huggingface/hub/datasets--Embodied-CoT--embodied_features_bridge/"
+        "snapshots/854ee59c7c76868d63fac37c33e0f031ed678014/embodied_features_bridge.json"
+    )
+
+    # Bridge V2 image source. None means use NullImageLoader (black frames, plumbing only).
+    bridge_images_root: str | None = None
+
+    # Format options.
+    include_plan: bool = True
+    skip_steps_without_change: bool = False  # If True, dedupe consecutive identical phases.
+    max_episodes: int | None = None  # Cap episodes for smoke tests.
+
+    # Disable RLDS-specific machinery — Bridge ECoT does not go through RLDS.
+    rlds_data_dir: str = ""
+
+    @override
+    def _create_data_transforms(
+        self, base_cfg: DataConfig, model_config: _model.BaseModelConfig
+    ) -> upstream_transforms.Group:
+        # Bridge ECoT samples are produced directly in the schema expected by
+        # TokenizePromptAndReasoning (prompt / language_actions / langact / image).
+        # No additional input transforms are required at this layer — the dataset
+        # class already emits the right keys.
+        return upstream_transforms.Group(inputs=[], outputs=[])
+
+    @override
+    def _create_model_transforms(
+        self, base_cfg: DataConfig, model_config: _model.BaseModelConfig
+    ) -> upstream_transforms.Group:
+        # Reuse the standard model transform factory — the cascade-VLA
+        # tokenizer changes already handle the two-segment [think]/[action] path
+        # when the sample contains a `langact` field.
+        return ModelTransformFactory(
+            prompt_format=model_config.prompt_format,
+            prediction_format=model_config.prediction_format,
+            gemma3_tokenizer_path=base_cfg.gemma3_tokenizer_path,
+        )(model_config)
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDataConfig(BaseDataConfigFactory):
     """
     Config for training on OXE/DROID, using RLDS data format (for efficient training on larger datasets).
@@ -827,6 +894,58 @@ _CONFIGS = [
         keep_period=2000,
         num_train_steps=40_001,
         ema_schedule_choice=EmaScheduleChoice(kind="cosine_delayed", start_step=1000),
+    ),
+    # ------------------------------------------------------------------
+    # Cascade-VLA Bridge pretraining (expert-0 only, no action diffusion).
+    # ------------------------------------------------------------------
+    # NOTE: Requires Bridge V2 images to be available. With the default
+    # `NullImageLoader` the pipeline runs but produces no useful gradients
+    # because images are constant black frames. See
+    # cascade-bridge-pretraining-discussion.md §4 for image-data setup.
+    TrainConfig(
+        name="lap_bridge_pretrain",
+        model=lap_config.LAPConfig(
+            action_dim=7,                   # placeholder — unused with action training disabled
+            action_horizon=1,               # placeholder
+            max_token_len=256,              # task + plan + reasoning + langact ~150-200 tokens; leaves headroom
+            pi05=True,
+            discrete_state_input=False,     # Bridge ECoT has no proprio state
+            # === Single-expert language pretraining ===
+            enable_action_training=False,
+            enable_langact_training=True,
+            enable_prediction_training=False,
+            enable_vqa_training=False,
+            # === Cascade-VLA toggles (no-op when action training disabled, kept for clarity) ===
+            action_attention_mode="lap_original",
+            stop_grad_mode="off",
+            # === Backbone ===
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",   # unused
+            prompt_format="lap",
+            language_loss_weight=1.0,
+            enable_image_augmentation=True,
+        ),
+        data=BridgeECoTDataConfig(
+            include_plan=True,
+            skip_steps_without_change=False,
+            shuffle_buffer_size=10_000,
+            val_fraction=0.0,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2000,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-6,
+        ),
+        weight_loader=weight_loaders.WeightLoaderChoice(
+            kind="paligemma",
+            params_path="checkpoints/paligemma-2b-mix-224",
+        ),
+        save_interval=5000,
+        keep_period=5000,
+        num_train_steps=100_001,
+        batch_size=128,
+        ema_schedule_choice=EmaScheduleChoice(kind="cosine_delayed", start_step=2000),
     ),
     *upstream_config._CONFIGS,  # noqa: SLF001
 ]

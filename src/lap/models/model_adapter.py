@@ -39,7 +39,15 @@ class ExtendedModelType(str, Enum):
 class CoTObservation(_model.Observation[ArrayT], Generic[ArrayT]):
     # --- CoT / vis extras (all optional) ---
     images: dict[str, at.Float[ArrayT, "*b h w c"]]
+    # Mask covering ALL autoregressively-predicted text positions (reasoning + langact).
+    # Used as causal ar_mask for text and as the CE loss target mask.
     tokenized_langact_mask: at.Bool[ArrayT, "*b l"] | None = None
+    # Mask covering ONLY the [think] (reasoning) segment within the tokenized prompt.
+    # Used by `_build_prefix_action_mask` when action_attention_mode="unmask_langact"
+    # to surgically block reasoning while keeping langact accessible to the action expert.
+    # Also consumed by the gemma backbone's stop_grad_mode="partial" path to identify
+    # which positions should remain gradient-flowing.
+    tokenized_reasoning_mask: at.Bool[ArrayT, "*b l"] | None = None
     critical_token_mask: at.Bool[ArrayT, "*b l"] | None = None
     number_token_mask: at.Bool[ArrayT, "*b l"] | None = None
     direction_token_mask: at.Bool[ArrayT, "*b l"] | None = None
@@ -69,6 +77,7 @@ class CoTObservation(_model.Observation[ArrayT], Generic[ArrayT]):
         return cls(
             **base_dict,
             tokenized_langact_mask=getk("tokenized_langact_mask"),
+            tokenized_reasoning_mask=getk("tokenized_reasoning_mask"),
             critical_token_mask=getk("critical_token_mask"),
             number_token_mask=getk("number_token_mask"),
             direction_token_mask=getk("direction_token_mask"),

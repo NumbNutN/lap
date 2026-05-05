@@ -164,7 +164,7 @@ class Attention(nn.Module):
     cache_dtype: str | None = None
 
     @nn.compact
-    def __call__(self, xs, positions, attn_mask, kv_cache):
+    def __call__(self, xs, positions, attn_mask, kv_cache, vlm_no_stop_mask=None):
         # all experts must share the same head dim, num heads, and num kv heads for self-attention to work
         assert all(config.head_dim == self.configs[0].head_dim for config in self.configs)
         assert all(config.num_heads == self.configs[0].num_heads for config in self.configs)
@@ -211,6 +211,15 @@ class Attention(nn.Module):
                 if x is not None:
                     token_owner.append(jnp.full((x.shape[0], x.shape[1]), i, dtype=jnp.int32))
             token_owner = jnp.concatenate(token_owner, axis=1)
+            # Validate the optional per-VLM-position "no-stop" mask shape. True means
+            # the gradient SHOULD flow through that VLM position (used by Variant 2 to
+            # keep langact gradient-flowing while detaching prompt/reasoning).
+            if vlm_no_stop_mask is not None:
+                expert0_len = xs[0].shape[1]
+                assert vlm_no_stop_mask.shape == (xs[0].shape[0], expert0_len), (
+                    f"vlm_no_stop_mask shape {vlm_no_stop_mask.shape} does not match "
+                    f"VLM expert prefix shape ({xs[0].shape[0]}, {expert0_len})"
+                )
 
         q = _apply_rope(q, positions=positions)
         q *= self.configs[0].head_dim ** -0.5
@@ -246,11 +255,37 @@ class Attention(nn.Module):
             k_owner = token_owner[:, None, None, None, :]  # B,1,1,1,S
             cross_to_expert0 = (q_owner != 0) & (k_owner == 0)
 
+            # Apply the optional per-position "no-stop" mask to surgically exclude
+            # certain VLM positions (e.g., langact) from the stop_gradient path.
+            # `cross_to_expert0` flags positions that get stop_gradient; we AND with
+            # NOT(no_stop) so flagged positions become "still-flowing".
+            if vlm_no_stop_mask is not None:
+                expert0_len = xs[0].shape[1]
+                vlm_stop_mask = jnp.logical_not(vlm_no_stop_mask)  # True where stop_grad applies
+                # Pad to full sequence length; non-VLM positions are irrelevant for cross_to_expert0.
+                vlm_stop_full = jnp.concatenate(
+                    [
+                        vlm_stop_mask,
+                        jnp.ones(
+                            (vlm_stop_mask.shape[0], token_owner.shape[1] - expert0_len), dtype=bool
+                        ),
+                    ],
+                    axis=1,
+                )
+                cross_to_expert0 = cross_to_expert0 & vlm_stop_full[:, None, None, None, :]
+
             expert0_len = xs[0].shape[1]
             k0 = k[:, :expert0_len, ...]
             q_i = q[:, expert0_len:, ...]
+            # Build a per-key gradient-passthrough k0 used for cross-attn into expert 0.
+            if vlm_no_stop_mask is not None:
+                # Where no_stop=True keep gradient (k0); where False detach (stop_grad(k0)).
+                no_stop_3d = vlm_no_stop_mask[..., None, None]  # B,S,1,1
+                k0_for_cross = jnp.where(no_stop_3d, k0, jax.lax.stop_gradient(k0))
+            else:
+                k0_for_cross = jax.lax.stop_gradient(k0)
             logits0_i = jnp.einsum(
-                "BTKGH,BSKH->BKGTS", q_i, jax.lax.stop_gradient(k0), preferred_element_type=jnp.float32
+                "BTKGH,BSKH->BKGTS", q_i, k0_for_cross, preferred_element_type=jnp.float32
             )
             logits = logits.at[:, :, :, expert0_len:, :expert0_len].set(logits0_i)
 
@@ -264,8 +299,19 @@ class Attention(nn.Module):
             # Detach values from expert 0 when consumed by other experts.
             probs_cross = probs * cross_to_expert0.astype(probs.dtype)
             probs_self = probs - probs_cross
+            # Build a v that selectively passes/blocks gradient on a per-position basis.
+            if vlm_no_stop_mask is not None:
+                expert0_len = xs[0].shape[1]
+                v0 = v[:, :expert0_len, ...]
+                no_stop_3d = vlm_no_stop_mask[..., None, None]  # B,S_vlm,1,1
+                v0_mixed = jnp.where(no_stop_3d, v0, jax.lax.stop_gradient(v0))
+                v_for_cross = jnp.concatenate(
+                    [v0_mixed, jax.lax.stop_gradient(v[:, expert0_len:, ...])], axis=1
+                )
+            else:
+                v_for_cross = jax.lax.stop_gradient(v)
             encoded = jnp.einsum("BKGTS,BSKH->BTKGH", probs_self, v) + jnp.einsum(
-                "BKGTS,BSKH->BTKGH", probs_cross, jax.lax.stop_gradient(v)
+                "BKGTS,BSKH->BTKGH", probs_cross, v_for_cross
             )
         else:
             encoded = jnp.einsum("BKGTS,BSKH->BTKGH", probs, v)
@@ -333,7 +379,9 @@ class Block(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
+    def __call__(  # noqa: FBT002
+        self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True, vlm_no_stop_mask=None
+    ):
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -353,7 +401,7 @@ class Block(nn.Module):
             gates.append(gate if x is not None else None)
 
         pre_attn = sharding.activation_sharding_constraint(pre_attn)
-        post_attn, kv_cache = attn(pre_attn, positions, attn_mask, kv_cache)
+        post_attn, kv_cache = attn(pre_attn, positions, attn_mask, kv_cache, vlm_no_stop_mask=vlm_no_stop_mask)
         post_attn = jax.tree.map(lambda x: drop(x, deterministic), post_attn)
         post_attn = sharding.activation_sharding_constraint(post_attn)
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, post_attn, gates, strict=True)]
@@ -431,7 +479,8 @@ class Module(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
-            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic
+                nn.broadcast,
+            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic, 5=vlm_no_stop_mask
             length=self.configs[0].depth,
         )(
             configs=self.configs,
@@ -464,6 +513,7 @@ class Module(nn.Module):
         deterministic: bool = True,
         return_layer_outputs: bool = False,
         layer_indices: Sequence[int] | None = None,
+        vlm_no_stop_mask: at.Bool[at.Array, "b s"] | None = None,
     ) -> (
         tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache]
         | tuple[
@@ -496,8 +546,11 @@ class Module(nn.Module):
         if adarms_cond is None:
             adarms_cond = [None] * len(self.configs)
 
-        # Always run through layers normally
-        embedded, kv_cache = self.layers(embedded, kv_cache, positions, mask, adarms_cond, deterministic)
+        # Always run through layers normally. `vlm_no_stop_mask` is broadcast across
+        # layers via nn.scan in_axes; None disables the partial-stop_grad path.
+        embedded, kv_cache = self.layers(
+            embedded, kv_cache, positions, mask, adarms_cond, deterministic, vlm_no_stop_mask
+        )
 
         # Note: intermediate layer outputs are captured via sow and collected
         # by the caller using mutable=['intermediates']. The layer_outputs dict

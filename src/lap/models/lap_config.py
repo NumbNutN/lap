@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import flax.nnx as nnx
 import jax
@@ -13,6 +13,22 @@ import lap.models.backbones.gemma as _gemma
 import lap.models.backbones.gemma3 as _gemma3
 from lap.models.model_adapter import CoTObservation
 from lap.models.model_adapter import ExtendedModelType
+
+# Cascade-VLA action attention modes.
+# Controls what the action expert is allowed to attend to in the prefix.
+ActionAttentionMode = Literal["lap_original", "unmask_langact"]
+# - "lap_original": action attends to image + prompt; reasoning + langact both blocked.
+#                   This is the original LAP behavior (tokenized_langact_mask is the block target).
+# - "unmask_langact": action attends to image + prompt + langact; only reasoning blocked.
+#                    Requires tokenized_reasoning_mask to be present in observation.
+
+# Cascade-VLA stop-gradient mode for action_expert -> VLM cross-attention.
+StopGradMode = Literal["off", "full", "partial"]
+# - "off": no stop_gradient. Action loss flows back into VLM trunk freely (Variant 3 / cascade full grad).
+# - "full": stop_gradient on all VLM K/V (image + prompt + reasoning + langact).
+#           Equivalent to original LAP `stop_action_to_vlm_grad=True` (Variant 1).
+# - "partial": stop_gradient on image + prompt + reasoning K/V, but allow gradient
+#              through langact K/V (Variant 2). Requires tokenized_langact_mask.
 
 if TYPE_CHECKING:
     from lap.models.lap import LAP
@@ -71,13 +87,38 @@ class LAPConfig(_model.BaseModelConfig):
 
     # When True, stops gradients produced by the action expert from flowing back
     # into the VLM expert through cross-attention.
+    # NOTE: this is the legacy binary switch. For cascade-VLA experiments prefer
+    # `stop_grad_mode` below, which provides finer-grained control. When
+    # `stop_grad_mode != "off"`, this flag is automatically forced to True so the
+    # gemma backbone enables its stop_gradient path.
     stop_action_to_vlm_grad: bool = False
+
+    # ---- Cascade-VLA experiment toggles ----
+    # Control which prefix tokens the action expert can attend to.
+    # See ActionAttentionMode docstring above.
+    action_attention_mode: ActionAttentionMode = "lap_original"
+
+    # Control how action_expert -> VLM gradient is masked.
+    # See StopGradMode docstring above. Variant matrix:
+    #   Variant 0 (LAP baseline)         : action_attention_mode="lap_original",   stop_grad_mode="full"
+    #   Variant 1 (LAP-Unmask-Stop)      : action_attention_mode="unmask_langact", stop_grad_mode="full"
+    #   Variant 2 (LAP-Unmask-Partial)   : action_attention_mode="unmask_langact", stop_grad_mode="partial"
+    #   Variant 3 (LAP-Unmask-Free)      : action_attention_mode="unmask_langact", stop_grad_mode="off"
+    stop_grad_mode: StopGradMode = "full"
 
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:
             object.__setattr__(self, "discrete_state_input", self.pi05)
+        # Derive stop_action_to_vlm_grad from stop_grad_mode for backwards compat.
+        # `stop_action_to_vlm_grad` is the master enable for the gemma backbone path;
+        # `stop_grad_mode` selects the role-mask within that path.
+        if self.stop_grad_mode != "off" and not self.stop_action_to_vlm_grad:
+            object.__setattr__(self, "stop_action_to_vlm_grad", True)
+        if self.stop_grad_mode == "off" and self.stop_action_to_vlm_grad:
+            # Explicit "off" should win.
+            object.__setattr__(self, "stop_action_to_vlm_grad", False)
 
     @property
     def image_keys(self) -> tuple[str, ...]:
@@ -123,6 +164,7 @@ class LAPConfig(_model.BaseModelConfig):
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
                 tokenized_langact_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                tokenized_reasoning_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
                 critical_token_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)

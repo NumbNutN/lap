@@ -104,6 +104,9 @@ class LAP(_pi0.Pi0):
         self.action_loss_weight = float(getattr(config, "action_loss_weight", 1.0))
         self.prediction_loss_weight = float(getattr(config, "prediction_loss_weight", 0.2))
         self.vqa_loss_weight = float(getattr(config, "vqa_loss_weight", 0.1))
+        # Cascade-VLA toggles. See lap_config.ActionAttentionMode / StopGradMode.
+        self.action_attention_mode = getattr(config, "action_attention_mode", "lap_original")
+        self.stop_grad_mode = getattr(config, "stop_grad_mode", "off")
         vqa_loss_weights_dict = getattr(config, "vqa_loss_weights", None)
         if vqa_loss_weights_dict is not None:
             self.vqa_loss_weights_by_id = {
@@ -305,24 +308,93 @@ class LAP(_pi0.Pi0):
         prefix_mask: at.Bool[at.Array, "b s"],
         observation: CoTObservation | Observation,
     ) -> at.Bool[at.Array, "b s"]:
-        """Build prefix mask for action attention, excluding langact tokens.
+        """Build prefix mask for action attention.
 
-        Action tokens should attend to images + prompt, but NOT langact tokens.
-        This creates a mask that is True for images and prompt, False for langact.
+        Behaviour depends on `self.action_attention_mode` (see lap_config):
+
+        - "lap_original" (default, backward-compatible):
+            Action attends to image + prompt; both reasoning and langact are blocked.
+            The block target is `observation.tokenized_langact_mask`, which in legacy
+            single-segment mode covers all autoregressive text tokens.
+
+        - "unmask_langact":
+            Action attends to image + prompt + langact; only the reasoning ([think])
+            segment is blocked. Requires `observation.tokenized_reasoning_mask` to
+            be present (produced by the two-segment tokenizer path). When that mask
+            is missing we silently fall back to "lap_original" behaviour and warn
+            via the python logger so misconfigurations surface during training.
         """
-        if observation.tokenized_langact_mask is None:
+        if self.action_attention_mode == "unmask_langact":
+            block_mask = getattr(observation, "tokenized_reasoning_mask", None)
+            if block_mask is None:
+                logger.warning(
+                    "action_attention_mode='unmask_langact' but tokenized_reasoning_mask "
+                    "is None; falling back to original LAP behaviour (block langact). "
+                    "Make sure your data pipeline emits reasoning_mask via the two-segment tokenizer."
+                )
+                block_mask = observation.tokenized_langact_mask
+        else:  # "lap_original"
+            block_mask = observation.tokenized_langact_mask
+
+        if block_mask is None:
             return prefix_mask
-        # Expand langact_mask to full prefix length (add zeros for image positions)
-        img_seq_len = prefix_mask.shape[1] - observation.tokenized_langact_mask.shape[1]
-        langact_mask_full = jnp.concatenate(
+
+        # Expand block_mask to full prefix length (image positions are not blocked).
+        img_seq_len = prefix_mask.shape[1] - block_mask.shape[1]
+        block_mask_full = jnp.concatenate(
             [
-                jnp.zeros((observation.tokenized_langact_mask.shape[0], img_seq_len), dtype=bool),
-                observation.tokenized_langact_mask,
+                jnp.zeros((block_mask.shape[0], img_seq_len), dtype=bool),
+                block_mask,
             ],
             axis=1,
         )
-        # Return True for images + prompt (non-langact), False for langact
-        return jnp.logical_and(prefix_mask, jnp.logical_not(langact_mask_full))
+        # True = action can attend; False = blocked.
+        return jnp.logical_and(prefix_mask, jnp.logical_not(block_mask_full))
+
+    def _build_vlm_no_stop_mask(
+        self,
+        prefix_mask: at.Bool[at.Array, "b s"],
+        observation: CoTObservation | Observation,
+    ) -> at.Bool[at.Array, "b s"] | None:
+        """Build per-position mask for partial stop_gradient on VLM->action cross-attn.
+
+        Only relevant when `self.stop_grad_mode == "partial"`. Returns a (B, prefix_len)
+        boolean array where True positions should NOT be detached (gradient flows from
+        action_expert back into VLM trunk through them); False positions follow the
+        usual stop_gradient. Returns None for "off" / "full" modes since the gemma
+        backbone handles those uniformly.
+
+        For Variant 2 we keep the langact span gradient-flowing and detach everything
+        else (image + prompt + reasoning).
+        """
+        if self.stop_grad_mode != "partial":
+            return None
+        # Identify langact-only positions = ar_mask minus reasoning_only_mask.
+        ar_mask = observation.tokenized_langact_mask
+        reasoning_mask = getattr(observation, "tokenized_reasoning_mask", None)
+        if ar_mask is None:
+            logger.warning(
+                "stop_grad_mode='partial' requires tokenized_langact_mask; got None. "
+                "Disabling partial stop_grad for this batch."
+            )
+            return None
+        if reasoning_mask is None:
+            # Without a reasoning sub-mask we cannot subtract it; treat the whole ar_mask
+            # (langact + reasoning) as the "no stop" region. This is permissive — closer
+            # to Variant 3 than Variant 2 — but keeps training functional.
+            langact_only = ar_mask
+        else:
+            langact_only = jnp.logical_and(ar_mask, jnp.logical_not(reasoning_mask))
+
+        # Pad to full prefix length (image positions are detached as usual).
+        img_seq_len = prefix_mask.shape[1] - langact_only.shape[1]
+        return jnp.concatenate(
+            [
+                jnp.zeros((langact_only.shape[0], img_seq_len), dtype=bool),
+                langact_only,
+            ],
+            axis=1,
+        )
 
     def _build_combined_attention_mask(
         self,
@@ -445,6 +517,12 @@ class LAP(_pi0.Pi0):
             prefix_mask, prefix_mask_action, suffix_inputs["suffix_mask"] if self.enable_action_training else None
         )
 
+        # Build the per-VLM-position no-stop mask used by stop_grad_mode="partial".
+        # None for "off"/"full" modes — the gemma backbone handles those uniformly.
+        vlm_no_stop_mask = (
+            self._build_vlm_no_stop_mask(prefix_mask, observation) if self.enable_action_training else None
+        )
+
         pre_logits, _ = self.PaliGemma.llm(
             embedded=[prefix_tokens, suffix_inputs["suffix_tokens"]]
             if self.enable_action_training
@@ -452,6 +530,7 @@ class LAP(_pi0.Pi0):
             positions=combined_positions,
             mask=combined_mask,
             adarms_cond=[None, suffix_inputs["adarms_cond"]] if self.enable_action_training else [None],
+            vlm_no_stop_mask=vlm_no_stop_mask,
             **model_forward_kwargs,
         )
 

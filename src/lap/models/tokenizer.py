@@ -119,6 +119,12 @@ class BaseTokenizer(ABC):
 
         Returns:
             (attn_mask, reasoning_mask, token_loss_mask)
+
+        Note:
+            In legacy single-segment mode this returns the "langact"-style mask
+            covering everything between reasoning_start and reasoning_end. For the
+            cascade-VLA two-segment format use `_create_segmented_masks` below to
+            also obtain a reasoning-only sub-mask.
         """
         attn_mask = np.zeros(self._max_len, dtype=bool)
         token_loss_mask = np.ones(self._max_len, dtype=bool)
@@ -136,6 +142,50 @@ class BaseTokenizer(ABC):
             reasoning_mask[start_idx:end_idx] = True
 
         return attn_mask, reasoning_mask, token_loss_mask
+
+    def _create_segmented_masks(
+        self,
+        token_count: int,
+        reasoning_start: int,
+        reasoning_end: int,
+        langact_start: int,
+        langact_end: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Create masks for the cascade-VLA two-segment ``[think] ... [action] ...`` layout.
+
+        Args:
+            token_count: number of tokens before right-padding.
+            reasoning_start/end: index range covering the [think] segment.
+            langact_start/end: index range covering the [action] segment.
+
+        Returns:
+            (attn_mask, ar_mask, reasoning_only_mask, token_loss_mask)
+            - attn_mask: True for non-pad positions.
+            - ar_mask: True for both reasoning and langact (everything the model
+              autoregressively predicts). Used for ar attention + CE loss target.
+            - reasoning_only_mask: True for [think] positions only. Used by the
+              action attention block mask and the partial stop_gradient path.
+            - token_loss_mask: initialized to all True.
+        """
+        attn_mask = np.zeros(self._max_len, dtype=bool)
+        token_loss_mask = np.ones(self._max_len, dtype=bool)
+        ar_mask = np.zeros(self._max_len, dtype=bool)
+        reasoning_only_mask = np.zeros(self._max_len, dtype=bool)
+
+        attn_mask[:token_count] = True
+
+        r_s = max(0, min(self._max_len, reasoning_start))
+        r_e = max(0, min(self._max_len, reasoning_end))
+        if r_e > r_s:
+            reasoning_only_mask[r_s:r_e] = True
+            ar_mask[r_s:r_e] = True
+
+        l_s = max(0, min(self._max_len, langact_start))
+        l_e = max(0, min(self._max_len, langact_end))
+        if l_e > l_s:
+            ar_mask[l_s:l_e] = True
+
+        return attn_mask, ar_mask, reasoning_only_mask, token_loss_mask
 
     def _apply_reasoning_dropout(
         self,
@@ -241,27 +291,38 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
         state: np.ndarray | None = None,
         state_type: str | None = None,
         *,
+        langact: str | None = None,
         is_vqa_sample: bool = False,
         is_prediction_sample: bool = False,
         time_horizon_seconds: float | None = None,
         frame_description: str = "robot base frame",
         state_dropout: float = 0.0,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, np.ndarray, np.ndarray | None]:
+    ) -> tuple[
+        np.ndarray,             # tokens
+        np.ndarray,             # attn_mask
+        np.ndarray | None,      # langact_mask (= ar_mask, covers reasoning + langact in two-seg mode)
+        np.ndarray | None,      # number_mask
+        np.ndarray | None,      # direction_mask
+        np.ndarray | None,      # token_loss_mask
+        np.ndarray | None,      # reasoning_only_mask (None in legacy single-segment mode)
+    ]:
         """Tokenize prompt and reasoning for chain-of-thought model.
 
-        Args:
-            prompt: Task description
-            reasoning: Optional language actions/reasoning
-            state: Optional state vector
-            state_type: Optional state type descriptor
-            is_vqa_sample: Whether this is a VQA sample
-            is_prediction_sample: Whether this is a prediction sample
-            time_horizon_seconds: Optional time horizon for predictions
-            frame_description: Description of coordinate frame
-            state_dropout: Probability of dropping state info
+        Single-segment legacy mode (langact=None):
+            ``[BOS] <formatted_prompt> <reasoning> [EOS] [PAD]...``
+            The returned `langact_mask` covers <reasoning>, `reasoning_only_mask` is None.
+            This preserves backward compatibility with the original LAP behaviour.
 
-        Returns:
-            Tuple of (tokens, attn_mask, reasoning_mask, number_mask, direction_mask, token_loss_mask)
+        Two-segment cascade-VLA mode (langact is a string):
+            ``[BOS] <formatted_prompt> <reasoning> [action] <langact> [EOS] [PAD]...``
+            `langact_mask` covers BOTH the reasoning and langact tokens (used as
+            ar_mask + CE loss target). `reasoning_only_mask` covers only the
+            reasoning portion (used by the action attention block mask and the
+            partial stop_gradient path).
+
+        The `[action]` separator is a literal text marker whose tokens fall in
+        between the reasoning and langact spans; it is NOT counted as either
+        reasoning or langact, so neither mask covers it.
         """
         fmt = self._resolve_format(is_vqa_sample, is_prediction_sample)
 
@@ -281,24 +342,47 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
         reasoning_start = len(tokens)
         if reasoning is not None:
             clean_reason = reasoning.strip().replace("_", " ").replace("\n", " ")
-            tokens += self._tokenizer.encode(clean_reason, add_bos=False, add_eos=True)
+            # In two-segment mode we suppress EOS here; EOS is appended after langact below.
+            add_eos_for_reasoning = langact is None
+            tokens += self._tokenizer.encode(clean_reason, add_bos=False, add_eos=add_eos_for_reasoning)
         reasoning_end = len(tokens)
 
+        # Two-segment cascade-VLA mode: append [action] separator + langact + EOS.
+        langact_start = reasoning_end
+        langact_end = reasoning_end
+        if langact is not None:
+            # The literal "[action]" marker is encoded but excluded from both masks.
+            sep_tokens = self._tokenizer.encode(" [action] ", add_bos=False, add_eos=False)
+            tokens += sep_tokens
+            langact_start = len(tokens)
+            clean_langact = langact.strip().replace("_", " ").replace("\n", " ")
+            tokens += self._tokenizer.encode(clean_langact, add_bos=False, add_eos=True)
+            langact_end = len(tokens)
+
+        # Truncate to max length and clamp segment indices.
         if len(tokens) > self._max_len:
             tokens = tokens[: self._max_len]
             reasoning_end = min(reasoning_end, self._max_len)
+            langact_start = min(langact_start, self._max_len)
+            langact_end = min(langact_end, self._max_len)
 
-        # Create masks using base class helpers
-        attn_mask, reasoning_mask, token_loss_mask = self._create_base_masks(
-            len(tokens), reasoning_start, reasoning_end, reasoning is not None
-        )
+        if langact is None:
+            # Legacy single-segment path: langact_mask covers the (single) reasoning span.
+            attn_mask, langact_mask, token_loss_mask = self._create_base_masks(
+                len(tokens), reasoning_start, reasoning_end, reasoning is not None
+            )
+            reasoning_only_mask = None
+        else:
+            attn_mask, langact_mask, reasoning_only_mask, token_loss_mask = self._create_segmented_masks(
+                len(tokens), reasoning_start, reasoning_end, langact_start, langact_end
+            )
 
-        if reasoning is None:
+        if langact_mask is None:
             number_mask = None
             direction_mask = None
         else:
-            token_loss_mask = self._apply_reasoning_dropout(token_loss_mask, reasoning_mask, is_vqa_sample)
-            number_mask, direction_mask = self._build_number_direction_masks(tokens, reasoning_mask, fmt, is_vqa_sample)
+            token_loss_mask = self._apply_reasoning_dropout(token_loss_mask, langact_mask, is_vqa_sample)
+            number_mask, direction_mask = self._build_number_direction_masks(tokens, langact_mask, fmt, is_vqa_sample)
 
         # Right pad
         pad_count = self._max_len - len(tokens)
@@ -308,10 +392,11 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
         return (
             np.asarray(tokens, dtype=np.int32),
             attn_mask,
-            reasoning_mask,
+            langact_mask,
             number_mask,
             direction_mask,
             token_loss_mask,
+            reasoning_only_mask,
         )
 
     def decode(self, tokens: np.ndarray) -> str:
@@ -504,6 +589,9 @@ class Gemma3Tokenizer(BaseTokenizer):
         if pad_count > 0:
             tokens = tokens + [pad_id] * pad_count
 
+        # Two-segment cascade-VLA mode is not supported in Gemma3Tokenizer yet;
+        # return None for reasoning_only_mask to keep the tuple shape consistent
+        # with PaligemmaTokenizer.tokenize.
         return (
             np.asarray(tokens, dtype=np.int32),
             attn_mask,
@@ -511,6 +599,7 @@ class Gemma3Tokenizer(BaseTokenizer):
             number_mask,
             direction_mask,
             token_loss_mask,
+            None,
         )
 
     def decode(self, tokens: np.ndarray, skip_special_tokens: bool = True) -> str:
@@ -596,7 +685,17 @@ class FASTTokenizerMixin:
         state_dropout: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Handle VQA and prediction samples using language-based tokenization."""
-        tokens, attn_mask, reasoning_mask, _number_mask, _direction_mask, token_loss_mask = self.tokenize(
+        # NOTE: VQA / prediction samples always use single-segment legacy mode, so
+        # `reasoning_only_mask` from the new tokenize signature is unused here.
+        (
+            tokens,
+            attn_mask,
+            reasoning_mask,
+            _number_mask,
+            _direction_mask,
+            token_loss_mask,
+            _reasoning_only_mask,
+        ) = self.tokenize(
             prompt=prompt,
             reasoning=language_actions,
             state=state,

@@ -46,6 +46,11 @@ class TokenizePromptAndReasoning(DataTransformFn):
 
         # Always tokenize regular reasoning (prompt + language_actions)
         language_actions = data.pop("language_actions", None)  # if None, inference
+        # Optional cascade-VLA two-segment input: high-level reasoning ([think]) and
+        # low-level langact ([action]). When `langact` is provided, `language_actions`
+        # is treated as the [think] reasoning segment and `langact` as the [action]
+        # segment; the tokenizer will produce a separate `tokenized_reasoning_mask`.
+        langact = data.pop("langact", None)
         dataset_name = data.pop("dataset_name", None)  # if None, inference
         frame_description = data.pop("frame_description", "robot base frame")
         if dataset_name is not None:
@@ -66,7 +71,10 @@ class TokenizePromptAndReasoning(DataTransformFn):
 
         # frame_description = "robot base frame"
 
-        # Tokenize regular reasoning
+        # Tokenize regular reasoning. In single-segment legacy mode this returns
+        # `reasoning_only_mask=None`; in two-segment cascade-VLA mode it splits the
+        # ar-mask (`reasoning_mask`, used as langact_mask + CE target) from the
+        # reasoning-only sub-mask (used by the action attention block).
         (
             tokens,
             pad_mask,
@@ -74,10 +82,12 @@ class TokenizePromptAndReasoning(DataTransformFn):
             numeric_mask,
             direction_mask,
             token_loss_mask,
+            reasoning_only_mask,
         ) = self.tokenizer.tokenize(
             prompt,
             language_actions,
             state,
+            langact=langact,
             is_vqa_sample=is_vqa_sample,
             is_prediction_sample=is_prediction_sample,
             time_horizon_seconds=time_horizon_seconds,
@@ -86,7 +96,9 @@ class TokenizePromptAndReasoning(DataTransformFn):
         )
 
         # Combine number_mask and direction_mask for critical tokens
-        critical_mask = np.logical_or(numeric_mask, direction_mask)
+        critical_mask = (
+            np.logical_or(numeric_mask, direction_mask) if numeric_mask is not None else None
+        )
 
         result = {
             **data,
@@ -96,6 +108,10 @@ class TokenizePromptAndReasoning(DataTransformFn):
             "token_loss_mask": token_loss_mask,
             "tokenized_dataset_name": tokenized_dataset_name,
         }
+        if reasoning_only_mask is not None:
+            # Two-segment cascade-VLA mode: emit the reasoning-only sub-mask so the
+            # downstream model can apply unmask_langact / partial stop_grad logic.
+            result["tokenized_reasoning_mask"] = reasoning_only_mask
 
         if self.verbose_mode:
             result.update(

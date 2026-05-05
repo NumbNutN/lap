@@ -144,8 +144,22 @@ def create_data_loader(
     data_cfg: _config.DataConfig = config.data.create(config.assets_dirs, config.model)
     logging.info("data_config: %s", data_cfg)
 
+    # Bridge ECoT pretraining path: detected by repo_id="bridge_ecot".
+    # NOTE: Integration with the existing torch/RLDS loaders is non-trivial; see
+    # cascade-bridge-pretraining-discussion.md §12 for the design plan. For now
+    # we emit a clear error so misconfigurations are loud, not silent.
+    if getattr(data_cfg, "repo_id", None) == "bridge_ecot":
+        raise NotImplementedError(
+            "Bridge ECoT data_loader integration is not yet wired into "
+            "create_data_loader. The dataset class (BridgeECoTDataset), image "
+            "loader (LeRobotBridgeImageLoader), and config (BridgeECoTDataConfig) "
+            "are ready; the missing piece is batching/sharding/tokenization "
+            "wrapping. See cascade-bridge-pretraining-discussion.md §12 for the "
+            "implementation plan, then remove this stub."
+        )
+
     # If RLDS, follow the RLDS path with our two hooks; else, fall back to upstream torch loader
-    if data_cfg.rlds_data_dir is not None:
+    if data_cfg.rlds_data_dir is not None and data_cfg.rlds_data_dir != "":
         if framework == "pytorch":
             raise NotImplementedError("PyTorch RLDS data loader is not supported yet")
 

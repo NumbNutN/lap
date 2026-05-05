@@ -117,11 +117,32 @@ class NullImageLoader(BridgeV2ImageLoader):
 
 @dataclasses.dataclass
 class BridgeECoTSampleBuilder:
-    """Builds a single training sample dict from a (file, episode, step) triple."""
+    """Builds a single training sample dict from a (file, episode, step) triple.
+
+    Two layout modes (controlled by ``plan_as_ar_target``):
+
+    - ``plan_as_ar_target=False`` (legacy / "plan-as-input"):
+        prompt = ``"{task} [plan] {plan}"`` (plan shown to model as condition).
+        AR target: ``[think]<subtask_reason>[action]<subtask>``.
+
+    - ``plan_as_ar_target=True`` (recommended for pretraining):
+        prompt = ``"{task}"`` (task only).
+        AR target: ``[think]<plan>\\n<subtask_reason>[action]<subtask>``.
+        Plan becomes part of what the model has to predict.
+        See cascade-bridge-pretraining-discussion.md §10 for rationale.
+    """
 
     image_loader: BridgeV2ImageLoader
     include_plan: bool = True
-    plan_separator: str = " [plan] "
+    # If True, plan is emitted as part of the AR target (concatenated into reasoning).
+    # If False, plan is appended to the prompt text (input-only).
+    plan_as_ar_target: bool = True
+    # Separator inserted between task and plan in the prompt (only used when
+    # plan_as_ar_target=False).
+    plan_separator_prompt: str = " [plan] "
+    # Separator inserted between plan and subtask_reason in the AR target (only used
+    # when plan_as_ar_target=True). Newline keeps them visually distinct in decoded text.
+    plan_separator_ar: str = "\n"
 
     def build(
         self,
@@ -139,10 +160,23 @@ class BridgeECoTSampleBuilder:
         if not task or not subtask or not subtask_reason:
             return None
 
-        if self.include_plan and plan:
-            prompt = f"{task.strip()}{self.plan_separator}{plan.strip()}"
+        task = task.strip()
+        plan = plan.strip() if plan else ""
+        subtask = subtask.strip()
+        subtask_reason = subtask_reason.strip()
+
+        if self.include_plan and plan and not self.plan_as_ar_target:
+            # Mode A — plan as input to prompt.
+            prompt = f"{task}{self.plan_separator_prompt}{plan}"
+            reasoning_for_ar = subtask_reason
+        elif self.include_plan and plan and self.plan_as_ar_target:
+            # Mode B — plan as AR target (concatenated into reasoning segment).
+            prompt = task
+            reasoning_for_ar = f"{plan}{self.plan_separator_ar}{subtask_reason}"
         else:
-            prompt = task.strip()
+            # No plan available, or plan disabled.
+            prompt = task
+            reasoning_for_ar = subtask_reason
 
         try:
             image = self.image_loader.get(file_path, episode_id, step_idx)
@@ -159,8 +193,8 @@ class BridgeECoTSampleBuilder:
             "image": image,
             "image_mask": np.bool_(True),
             "prompt": prompt,
-            "language_actions": subtask_reason.strip(),
-            "langact": subtask.strip(),
+            "language_actions": reasoning_for_ar,
+            "langact": subtask,
             # Sample-type flags (cascade-VLA uses these to gate losses).
             "is_vqa_sample": np.bool_(False),
             "is_prediction_sample": np.bool_(False),

@@ -384,6 +384,161 @@ class BridgeV2ImageLoader:
 | 9 | 端到端跑通 1 个 batch（含真图） | 待 | 验证 token 化、masks、loss 计算无错 |
 | 10 | 启动 100K step 预训练 | 待 | 评估 langact_acc / reasoning perplexity 等 |
 
+## 9. ECoT JSON ↔ LeRobot 数据集对应关系（实测确认）
+
+下载的两个 LeRobot 数据集对应：
+| HF dataset | 含义 | 帧数 | episode 数 |
+|------------|------|------|-----------|
+| `jnogga/bridge_data_v2_teleop` | 远程操作 (人示教) demo | 1.56M | 43,457 |
+| `jnogga/bridge_data_v2_scripted` | 脚本生成 demo | (待查) | (待查) |
+
+ECoT JSON 的 `file_path` 键是原 Berkeley NFS 路径，例：
+
+```
+/nfs/kun2/users/homer/datasets/bridge_data_all/numpy_256/bridge_data_v2/<workspace>/<task>/<run_id>/train/out.npy
+└──────────────── prefix ────────────────┘└──────────── 任务标识 ────────────┘└─split─┘
+                                          ↑
+                                   这部分对应 LeRobot uuid 的 task_root
+```
+
+LeRobot uuid 例：
+
+```
+raw/bridge_data_v2/<workspace>/<task>/<run_id>/<datetime>/raw/traj_group<G>/traj<N>
+└─── task_root (与 ECoT 对应) ──────┘└──── 单个 trajectory 的标识 ────┘
+```
+
+**关键差异**：ECoT 一个 `out.npy` 文件**整体打包**了 `task_root` 下所有 trajectories；LeRobot 把每个 trajectory 拆成独立 episode。
+
+### 9.1 实测匹配率
+
+抽样 10 个 ECoT 路径，对照 LeRobot teleop（43,457 episodes）：
+
+| 类别 | ECoT 路径前缀 | 是否匹配 LeRobot teleop |
+|------|-------------|----------------------|
+| `numpy_256/bridge_data_v2/...` | ✅ 6/6（每条 ECoT entry 命中 25–50 个 LeRobot episode） |
+| `numpy_256/bridge_data_v1/...` | ✅（未抽到，但 LeRobot uuid 中有 `bridge_data_v1` 前缀，应该可匹配） |
+| `numpy_256/rss/...` / `numpy_256/icra/...` | ✅（首例 `rss/toykitchen2/pnp_sweep/203` 匹配 20 个 episode） |
+| `scripted_numpy_256/...` | ❌ 0 命中 LeRobot teleop（应在 LeRobot **scripted** 数据集找） |
+
+**结论**：
+- ECoT JSON `numpy_256/*` 前缀 → LeRobot **teleop** 数据集
+- ECoT JSON `scripted_numpy_256/*` 前缀 → LeRobot **scripted** 数据集
+
+LeRobot 数据集的 `bridge_data_v2_teleop` 描述：
+> Episodes with inconsistent data or lacking language instructions were discarded, leaving **~86%** of all teleoperated episodes.
+
+**所以 ECoT 全集与 LeRobot teleop 不会 100% 重合**。预计匹配率 ~86%（ECoT 是基于完整 Berkeley npy 生成的；LeRobot 过滤了 14%）。
+
+### 9.2 匹配算法（推荐实现）
+
+```python
+def build_ecot_to_lerobot_mapping():
+    """Build (ecot_file_path, ecot_episode_id) -> lerobot_episode_index mapping.
+
+    Algorithm:
+      1. Load ALL LeRobot episodes_meta into a dict keyed by `task_root`
+         (= uuid stripped of "<datetime>/raw/traj_group<G>/traj<N>").
+      2. For each ECoT (file_path, episode_id):
+         - Strip "<...>/numpy_256/" or "<...>/scripted_numpy_256/" from file_path.
+         - Strip trailing "/(train|val)/out.npy".
+         - Prepend "raw/" to get cand_task_root.
+         - Look up cand_task_root in the LeRobot dict.
+         - Within candidates, match by (n_steps == adapter.length, [optional] language_instruction).
+         - First exact (n_steps, lang) match wins.
+      3. Cache result to a JSON file (~30 MB) so we don't pay this cost every run.
+    """
+```
+
+**未匹配的 ECoT 项处理**：14% 估计落入"LeRobot 已过滤"集合，**这些 ECoT 样本本次预训练直接丢弃**（因为没有图像配对）。
+
+---
+
+## 10. 关于 plan 是否纳入 AR 目标的决策
+
+**用户问题**：为了让模型学到对任务的 plan，是否需要将 plan 也纳入 AR 的优化目标？
+
+**结论：是，建议把 plan 放进 AR 目标。** 但有一些细节需要决定。
+
+### 10.1 三种候选方案对比
+
+| 方案 | prompt 内容 | AR 目标内容 | 优点 | 缺点 |
+|------|-----------|------------|------|------|
+| **A. plan 为输入** (当前已实现) | `task + " [plan] " + plan` | `[think]<reasoning>[action]<langact>` | 简单、AR 目标短、训练快 | 推理时 plan 从哪来？需要外部生成 |
+| **B. plan 合并进 [think]** | `task` | `[think]<plan>; <subtask_reason>[action]<langact>` | 不改 tokenizer | plan 与 reasoning 混在一起，无独立粒度控制 |
+| **C. plan 独立 [plan] 段（新加 tokenizer 段）** | `task` | `[plan]<plan>[think]<subtask_reason>[action]<langact>` | 干净三段，可独立 loss 加权 | 需要扩 tokenizer，工程量大 |
+
+### 10.2 推荐：**方案 B（plan 合并进 [think] 段）**
+
+理由：
+1. **推理时模型自给自足** — 给定 task 就能产出完整 plan + reasoning + langact，不依赖外部 plan 来源（解决方案 A 的推理痛点）
+2. **不改 tokenizer** — 复用现有 `[think]/[action]` 双段架构，工程改动小
+3. **粒度可调** — 把 plan 当作 reasoning 的"开头部分"，可以用 `reasoning_mask_prob` 做 dropout 削弱权重；也可以在第一帧才包含 plan
+4. **数据驱动** — Bridge ECoT 里 plan 和 subtask_reason 本质都是"思考过程"的语言陈述，合并语义自然
+
+### 10.3 plan 应该每帧都参与还是只第一帧？
+
+**两个子方案**：
+
+**B1 — 每帧都 emit plan**
+```
+[think] {plan}\n{subtask_reason} [action] {subtask}
+```
+- 优点：训练数据规整，每个 sample 独立完备
+- 缺点：plan 在一个 episode 内不变，重复 N 次浪费 capacity；模型"学会"在每帧重新预测同一段固定文本，CE loss 被 plan 重复主导
+
+**B2 — 仅第一帧 emit plan，其他帧 skip plan**
+```
+phase 0 frame 0:    [think] {plan}\n{subtask_reason}_0 [action] {subtask}_0
+phase 0 frame 1+:   [think]                {subtask_reason}_0 [action] {subtask}_0
+phase 1+ all:       [think]                {subtask_reason}_i [action] {subtask}_i
+```
+- 优点：避免重复 plan，训练效率高
+- 缺点：dataloader 要标注 `is_first_frame_of_episode` 字段；推理时也要决定何时 emit plan
+
+**推荐 B2 的轻量版**：以概率 `p_plan` 在每帧把 plan 加进 [think] 段，否则 skip。建议 `p_plan = 1/n_steps_avg ≈ 1/30 ≈ 0.03`，但为了保证模型见过 plan，初始用 `p_plan=0.1`。
+
+```python
+# In dataloader
+if random.random() < p_plan:
+    reasoning_text = f"{plan}\n{subtask_reason}"
+else:
+    reasoning_text = subtask_reason
+```
+
+这样：
+- 每个 episode 平均出现 3-5 次 plan（够学）
+- 大多数样本只学 reasoning + langact（更符合实际推理负载）
+- 推理时模型见到 task + image，可以选择性地以低概率"开口"输出 plan（实际可能不会主动 emit，但需要时给特殊提示词触发）
+
+### 10.4 简化版决策（本次先做）
+
+**为了启动第一次训练，先采用方案 B1（每帧都 emit plan）**：
+- 实现简单，dataloader 不需要额外字段
+- Plan 重复确实浪费 ~30% capacity，但 Bridge 数据量大（86% × 43k ≈ 37k episodes × ~30 frames ≈ 1.1M samples）capacity 不缺
+- 验证可行后再迭代到 B2
+
+具体 dataloader 改动（在 [bridge_ecot_dataset.py](policy/lap/src/lap/datasets/bridge_ecot_dataset.py) `BridgeECoTSampleBuilder.build` 里）：
+
+```python
+# Current:
+prompt = f"{task}{plan_separator}{plan}"
+sample["prompt"] = prompt
+sample["language_actions"] = subtask_reason
+sample["langact"] = subtask
+
+# New (Plan-as-AR-target, B1):
+sample["prompt"] = task                                  # 仅 task 入 prompt
+sample["language_actions"] = f"{plan}\n{subtask_reason}"  # plan 拼到 reasoning 开头
+sample["langact"] = subtask
+```
+
+加一个 config flag `plan_as_ar_target: bool = True` 切换 A/B 行为。
+
+---
+
+## 11. 实施步骤清单（更新）
+
 ### 已实现部分的验证
 
 ```bash
@@ -407,6 +562,164 @@ cd policy/lap
 **P1 - 可与 P0 并行**：把 `BridgeECoTDataset` 接入 `data_loader.create_data_loader`。当前的 RLDS-only 路径需要新增分支判断 `isinstance(data_cfg, BridgeECoTDataConfig)` 走 Bridge 专用 dataloader。
 
 **P2 - 等 P0 完成后**：在 `BridgeECoTDataConfig` 里把 `bridge_images_root` 字段实际接到 image loader（`LeRobotBridgeImageLoader` 或 `RawNpyBridgeImageLoader`），然后启动训练。
+
+---
+
+## 12. ECoT ↔ LeRobot 集成与 dataloader 接入计划
+
+### 12.1 已实测的核心组件
+
+| 组件 | 位置 | 状态 |
+|------|------|------|
+| ECoT JSON 流式解析 | [bridge_ecot_dataset.py:BridgeECoTDataset](policy/lap/src/lap/datasets/bridge_ecot_dataset.py) | ✅ 测试通过（3 样本） |
+| ECoT ↔ LeRobot 路径映射 | [bridge_lerobot_loader.py:build_ecot_to_lerobot_mapping](policy/lap/src/lap/datasets/utils/bridge_lerobot_loader.py) | ✅ 跑通，43,714/60,062 配对 (72.8%) |
+| LeRobot mp4 帧读取 | [bridge_lerobot_loader.py:LeRobotBridgeImageLoader](policy/lap/src/lap/datasets/utils/bridge_lerobot_loader.py) | ✅ 跑通，224×224 RGB 真图 |
+| Plan-as-AR-target 模式 | [bridge_ecot_dataset.py:BridgeECoTSampleBuilder](policy/lap/src/lap/datasets/bridge_ecot_dataset.py) | ✅ 跑通，编码/解码一致 |
+| 端到端 sanity 脚本 | [test_bridge_batch_dump.py](policy/lap/scripts/test_bridge_batch_dump.py) | ✅ 跑通，PNG + TXT dump |
+
+### 12.2 视觉抽查结论
+
+样本 0 dump 的图像：木桌上有彩色积木 + 木质拱形物，与 task `Move the wooden arch onto the table` 语义匹配。
+
+**注意**：由于 ECoT episode_id → LeRobot traj_index 的对应是启发式的（`length` 配对 + ID 模 N 选择），同一 task_root 下多个等长 trajectory 可能错配。**对于纯语言 CoT 预训练影响不大**（统计模式仍然成立），但**未来 fine-tune action head 时必须改用更严格的对齐**（比如对比图像内容 hash 或第一帧叠加）。
+
+### 12.3 dataloader 接入方案（待实现）
+
+**问题**：现有 `data_loader.create_data_loader` 路由分两条：
+- RLDS path（基于 `data_cfg.rlds_data_dir is not None`）
+- 上游 torch path（HF LeRobot 标准格式）
+
+Bridge ECoT 既不是 RLDS（没有 TFDS 元数据），也不是标准 LeRobot 格式（自定义解析 JSON 取 reasoning），需要第三条路径。
+
+**实现思路（推荐）**：
+1. 在 `create_data_loader` 顶部加 `if data_cfg.repo_id == "bridge_ecot":` 分支
+2. 该分支：
+   - 构造 `BridgeECoTDataset` + `LeRobotBridgeImageLoader`
+   - 包装为 torch `IterableDataset`
+   - 走 torch `DataLoader` + `collate_fn` 处理 batch
+   - 应用 `model_transforms`（tokenizer）于每个 sample
+3. 输出仍然是 `(CoTObservation, Actions)` 元组（actions 全 0 占位，下游会被 `enable_action_training=False` 屏蔽）
+
+当前已在 [data_loader.py](policy/lap/src/lap/datasets/data_loader.py#L148) 加了 `NotImplementedError` stub，提示具体实现位置。
+
+**估计工作量**：1 天（torch IterableDataset wrapper + collate_fn + 测试）。
+
+### 12.4 在 K8s 上跑通 dataloader 验证
+
+> 实施顺序：先在本地 mock 数据上跑通 wrapper+collate；再 sync 到 pod 上用真数据验证 1 个 batch。
+
+完整实现后，验证步骤：
+```bash
+# Local: dry-run with NullImageLoader (no LeRobot deps)
+.venv/bin/python -c "
+from lap.training import config as _c
+from lap.datasets.data_loader import create_data_loader
+import jax
+cfg = _c.get_config('lap_bridge_pretrain')
+loader = create_data_loader(cfg)
+batch = next(iter(loader))
+obs, actions = batch
+print('obs.tokenized_prompt.shape:', obs.tokenized_prompt.shape)
+print('obs.tokenized_langact_mask sum/sample:', obs.tokenized_langact_mask.sum(axis=-1))
+print('actions.shape:', actions.shape, '(expected (B, 1, 7) all zeros)')
+"
+```
+
+---
+
+## 13. K8s 训练启动计划
+
+### 13.1 现有基建
+
+| 组件 | 位置 / 命令 |
+|------|------------|
+| Helm 模版 | `~/xshixun/user/userchart` |
+| Values 文件 | `~/xshixun/user/values-keepalive.yaml` |
+| 启动命令 | `helm install zhaoqc-pi05-finetune-steps-25000 --values ~/xshixun/user/values-keepalive.yaml ~/xshixun/user/userchart` |
+| 远端项目路径 | `/data/zhaoqc/RoboTwin` |
+| Pod 互联网代理 | `pod-tunnel proxy`（位于 `~/.local/bin/`） |
+| Local→Pod 同步 | `policy/pi05/sync_to_pod.sh` |
+
+### 13.2 数据搬运策略
+
+预训练需要的数据：
+
+| 数据 | 大小 | 用途 | 搬运方式 |
+|------|------|------|---------|
+| `embodied_features_bridge.json` | 1.4 GB | ECoT 标注 | sync_to_pod 或 pod 上 `huggingface-cli download` |
+| `bridge_data_v2_teleop` LeRobot | ~40 GB | 远程操作图像 | **pod 上下载**（用 `pod-tunnel proxy` 访问 HF） |
+| `bridge_data_v2_scripted` LeRobot | ~10 GB | 脚本 demo 图像 | **pod 上下载** |
+| PaliGemma 2B 检查点 | ~5 GB | 模型起点 | sync_to_pod（已有则跳过） |
+| LAP/RoboTwin 项目代码 | ~500 MB | 训练代码 | sync_to_pod 或 git push+pull |
+
+**推荐策略**：先 sync 代码到 pod，pod 上启动 proxy，pod 上 `huggingface-cli download` 拉数据（避免本地→pod 传 50GB 慢）。
+
+### 13.3 启动步骤（草案）
+
+```bash
+# === 1. Local：同步代码到 pod ===
+cd /home/numbnut/worksapce/RoboTwin
+# 推荐：先 git commit，然后在 pod 上 git pull（更稳）
+# 替代：直接 rsync 整个项目（会同步 .venv，慢）
+./policy/pi05/sync_to_pod.sh policy/lap/ /data/zhaoqc/RoboTwin/policy/lap
+
+# === 2. 在 pod 内（需先 helm install 起 pod，然后 kubectl exec）===
+# 2a. 启动 internet proxy
+~/.local/bin/pod-tunnel proxy &
+
+# 2b. 安装新依赖
+cd /data/zhaoqc/RoboTwin/policy/lap
+.venv/bin/python -m pip install ijson decord
+
+# 2c. 下载 ECoT JSON（1.4 GB）
+huggingface-cli download Embodied-CoT/embodied_features_bridge --repo-type dataset
+
+# 2d. 下载 LeRobot Bridge teleop（~40 GB）
+huggingface-cli download jnogga/bridge_data_v2_teleop --repo-type dataset
+
+# 2e. （可选）下载 scripted（~10 GB）
+huggingface-cli download jnogga/bridge_data_v2_scripted --repo-type dataset
+
+# 2f. 下载 PaliGemma 2B 检查点（如果 pod 上没有）
+# TODO: 确认 checkpoint 路径
+
+# === 3. 在 pod 上验证 dataloader 跑通 1 个 batch ===
+.venv/bin/python scripts/test_bridge_batch_dump.py --num-samples 2 --out-dir /tmp/bridge_dump
+
+# === 4. 启动训练 ===
+.venv/bin/python scripts/train.py --config-name lap_bridge_pretrain
+```
+
+### 13.4 训练监控
+
+需要监控的关键指标：
+
+- **`langact_loss`** — 主要训练目标（next-token CE on reasoning + langact）
+- **`langact_token_acc`** — 字符级准确率（verbose mode）
+- **`number_token_acc`** / **`direction_token_acc`** — Bridge 数据数字少，主要看 direction
+- **batch shape** — 验证 prompt token 长度 / langact span 长度的统计
+- **GPU/TPU 利用率** — 早期 dataloader 容易成为瓶颈
+
+预期 loss 曲线：从 ~10 (random init langact) 降到 ~1-2 (overfit) 在 50K steps 内。
+
+### 13.5 风险与缓解
+
+| 风险 | 缓解 |
+|------|------|
+| dataloader 是瓶颈（mp4 解码慢） | 用 `num_workers > 0`；预先把帧缓存为 numpy memmap |
+| 72.8% 配对率太低 | 已识别原因：v1 路径 + 长度过滤；可接受用于预训练 |
+| ECoT JSON 流式解析每 epoch 重读 | 把 episodes 索引序列化为 parquet（一次性预处理） |
+| pod 磁盘空间不足（50GB） | 检查 pod 磁盘前确认；如不足，仅用 teleop 部分 |
+| pod 内存爆（mapping 全表加载） | 当前 mapping JSON ~30MB，没问题 |
+
+### 13.6 训练前需用户决策的事项
+
+1. **plan_as_ar_target 默认值**：当前默认 True（推荐）。如果你想先和 §10.1 方案 A（plan 入 prompt）对比，需要在 config 里 toggle
+2. **是否包含 `bridge_data_v2_scripted`**：scripted 数据质量可能比 teleop 略低，可先只用 teleop（43k episodes）
+3. **batch_size**：当前 config 设 128。pod 单卡内存决定上限，建议先用 32 dry-run，再按显存放大
+4. **num_train_steps**：当前 100K。Bridge teleop 总 step 数 ~1.5M，按 batch 128 一个 epoch ~12K steps，100K steps ≈ 8 epoch。这是合理的
+5. **保存间隔**：当前 5K steps 保存一次，每个 ckpt ~10GB（PaliGemma 2B），100K steps 会保存 20 次共 200GB——磁盘够吗？建议加 `keep_period=5000` + `keep_last_n=3` 控制
+6. **wandb 项目名**：默认从 helm values 读，需要确认
 
 ---
 

@@ -104,7 +104,18 @@ class LAPConfig(_model.BaseModelConfig):
     #   Variant 1 (LAP-Unmask-Stop)      : action_attention_mode="unmask_langact", stop_grad_mode="full"
     #   Variant 2 (LAP-Unmask-Partial)   : action_attention_mode="unmask_langact", stop_grad_mode="partial"
     #   Variant 3 (LAP-Unmask-Free)      : action_attention_mode="unmask_langact", stop_grad_mode="off"
+    #   Variant 4 (Unmask-Plan-Stop)     : action_attention_mode="unmask_langact", cascade_unmask_plan=True, stop_grad_mode="full"
+    #   Variant 5 (Unmask-Plan-Free)     : action_attention_mode="unmask_langact", cascade_unmask_plan=True, stop_grad_mode="off"
     stop_grad_mode: StopGradMode = "full"
+
+    # Only meaningful when `action_attention_mode == "unmask_langact"`.
+    # When True, the action expert can additionally attend to [plan]<plan_text>
+    # tokens (in addition to the [action]<langact> segment that is always
+    # accessible in unmask mode). [stage]<reasoning> remains blocked regardless.
+    # Use case: ablation to test whether the global plan provides useful
+    # conditioning information to the action expert beyond what langact alone
+    # already supplies.
+    cascade_unmask_plan: bool = False
 
     def __post_init__(self):
         if self.max_token_len is None:
@@ -163,8 +174,9 @@ class LAPConfig(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
-                tokenized_langact_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
-                tokenized_reasoning_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                tokenized_ar_target_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                tokenized_stage_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                tokenized_plan_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
                 critical_token_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)

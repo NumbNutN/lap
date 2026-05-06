@@ -65,7 +65,7 @@ Phase 切换点：
 ### 2.1 我们的两段格式 → Bridge 字段映射
 
 ```
-[BOS] <task> [plan] <plan> [think] <subtask_reason> [action] <subtask> [EOS]
+[BOS] <task> [plan] <plan> [stage] <subtask_reason> [action] <subtask> [EOS]
         ↑       ↑              ↑                          ↑
        task    plan       subtask_reason              subtask
    (episode)(episode)      (phase)                    (phase)
@@ -74,14 +74,14 @@ Phase 切换点：
 ### 2.2 关于 `plan` 应该放哪里 —— **采用独立 [plan] 段**
 
 **用户提出的两种候选**：
-- (A) `<image><task>[think]<plan + subtask_reason>[action]<subtask>` — plan 并入 reasoning
-- (B) `<image><task>[plan]<plan>[think]<subtask_reason>[action]<subtask>` — plan 独立段
+- (A) `<image><task>[stage]<plan + subtask_reason>[action]<subtask>` — plan 并入 reasoning
+- (B) `<image><task>[plan]<plan>[stage]<subtask_reason>[action]<subtask>` — plan 独立段
 
 **结论：采用方案 B（独立 [plan] 段）**。
 
 **理由**：
 
-1. **粒度本质不同**。task 是"做什么"（episode-level WHAT），plan 是"怎么做的整体规划"（episode-level HOW），subtask_reason 是"当前 phase 为什么这么做"（phase-level）。混在一起后，方案 A 的 `[think]` 段每个 phase 都要重复 plan 内容（plan 不变），训练时 next-token CE loss 会被冗长固定文本主导。
+1. **粒度本质不同**。task 是"做什么"（episode-level WHAT），plan 是"怎么做的整体规划"（episode-level HOW），subtask_reason 是"当前 phase 为什么这么做"（phase-level）。混在一起后，方案 A 的 `[stage]` 段每个 phase 都要重复 plan 内容（plan 不变），训练时 next-token CE loss 会被冗长固定文本主导。
 
 2. **与 §10.2 的"phase 边界 AR 不依赖前 phase reasoning"决策一致**。方案 B 把 plan 放在 phase 边界**之上**的持久 prefix 里：
 
@@ -89,10 +89,10 @@ Phase 切换点：
    持久 prefix（每个新 phase AR 都看到）:
        <image_t><task>[plan]<plan>
    per-phase 部分（每个新 phase AR 重新生成，旧的丢弃）:
-       [think]<subtask_reason_i>[action]<subtask_i>
+       [stage]<subtask_reason_i>[action]<subtask_i>
    ```
 
-   方案 A 把 plan 和 subtask_reason 混在 `[think]` 段，phase 切换时 plan 也会被丢掉，用户必须每次 AR 都重新生成 plan（代价：长输出 + 每 phase 都要再现 plan 一字不差，模型容易学糊）。
+   方案 A 把 plan 和 subtask_reason 混在 `[stage]` 段，phase 切换时 plan 也会被丢掉，用户必须每次 AR 都重新生成 plan（代价：长输出 + 每 phase 都要再现 plan 一字不差，模型容易学糊）。
 
 3. **可消融**。方案 B 给 `[plan]` 段独立的 mask，未来可做"是否屏蔽 plan / 是否在新 phase mask plan / 等"消融。方案 A 没法做这种消融。
 
@@ -101,7 +101,7 @@ Phase 切换点：
 考虑到 PaliGemma tokenizer 是 SentencePiece + 257k 词表，方括号包裹的标记会被切成多个 subword，不是问题。建议：
 
 - `[plan]` — 持久段开始
-- `[think]` — phase-level reasoning 开始
+- `[stage]` — phase-level reasoning 开始
 - `[action]` — phase-level langact 开始
 - 不需要 `[/plan]` / `[/think]` 闭合，因为下一个标记的出现就隐式闭合了上一个
 
@@ -111,8 +111,8 @@ Phase 切换点：
 
 | Mask | Bridge 数据下覆盖范围 | 用于 |
 |------|--------------------|------|
-| `tokenized_langact_mask` | `[think]<subtask_reason>[action]<subtask>` 全部 | next-token CE loss + ar_mask |
-| `tokenized_reasoning_mask` | 只覆盖 `[think]<subtask_reason>` 段 | action attention 屏蔽（本次预训练 disable action 不会用到，但保留以便后续 fine-tune） |
+| `tokenized_ar_target_mask` | `[stage]<subtask_reason>[action]<subtask>` 全部 | next-token CE loss + ar_mask |
+| `tokenized_stage_mask` | 只覆盖 `[stage]<subtask_reason>` 段 | action attention 屏蔽（本次预训练 disable action 不会用到，但保留以便后续 fine-tune） |
 
 `<task>` 和 `[plan]<plan>` **不在任何 mask 内**，它们是给定的 prefix 条件，prompt_mask 已涵盖。
 
@@ -128,19 +128,19 @@ Phase 切换点：
 
 ### Q2: 关于 `<task>` vs `<reasoning>` 的边界
 
-> "为了应对数据集之前的差异，我们可能要明确一下 `<task>[think]<reasoning_i>[action]<langact_i>` 一部分文本应该属于 `<reasoning_i>` 还是属于 `<task>`，由于 10.2，在新的 phase 的 AR 不会 condition 之前的 `[think]<reasoning_i>`"
+> "为了应对数据集之前的差异，我们可能要明确一下 `<task>[stage]<reasoning_i>[action]<langact_i>` 一部分文本应该属于 `<reasoning_i>` 还是属于 `<task>`，由于 10.2，在新的 phase 的 AR 不会 condition 之前的 `[stage]<reasoning_i>`"
 
-**进一步澄清**：用户的核心担心是——如果某条信息**phase 间应该共享**，那它必须在 `<task>` 或 `[plan]` 里，**不能**在 `[think]<reasoning_i>` 里（否则 phase 切换后这条信息就丢了）。
+**进一步澄清**：用户的核心担心是——如果某条信息**phase 间应该共享**，那它必须在 `<task>` 或 `[plan]` 里，**不能**在 `[stage]<reasoning_i>` 里（否则 phase 切换后这条信息就丢了）。
 
 **判断准则**：
 | 信息层级 | 应该放哪 | 例 |
 |---------|---------|-----|
 | Episode 级常量（任务什么时候都不变） | `<task>` | "Move the wooden arch onto the table." |
 | Episode 级长期计划（phase 间不变） | `[plan]<plan>` | "Reach ... Grasp ... Move ... Drop ..." |
-| Phase 级（每个 phase 重新生成） | `[think]<reasoning_i>` | "The wooden arch is the object that needs to be moved..." |
+| Phase 级（每个 phase 重新生成） | `[stage]<reasoning_i>` | "The wooden arch is the object that needs to be moved..." |
 | Phase 级动作描述 | `[action]<langact_i>` | "Reach for the wooden arch." |
 
-**关键 invariant**：`[think]` + `[action]` 段是"可丢弃单元"。Phase 切换时这部分整段丢弃 + 重新生成，模型不会再看到它。
+**关键 invariant**：`[stage]` + `[action]` 段是"可丢弃单元"。Phase 切换时这部分整段丢弃 + 重新生成，模型不会再看到它。
 
 ### Q3: 失败 phase 处理
 
@@ -153,9 +153,9 @@ Phase 切换点：
 由于本次预训练 **disable action expert**（仅 expert 0 / 仅语言 CE loss），这个问题不影响本次。
 留作 fine-tune 阶段决策。**本次直接用 chunk 起始帧的 langact**（最自然、与训练数据对齐）。
 
-### Q10.5 重申: phase 切换时是否要"推掉" `[think]...[action]...`
+### Q10.5 重申: phase 切换时是否要"推掉" `[stage]...[action]...`
 
-> "推理时，如果在 phase 中再次中间观察，emit 同一个 langact；或者跨入下一个 phase，emit 了新的 langact，问题：是不是要把序列中的 `[think]...[action]...` 推掉，只 condition `<task>` 或者 `<task><plan>` 预测新的 langact"
+> "推理时，如果在 phase 中再次中间观察，emit 同一个 langact；或者跨入下一个 phase，emit 了新的 langact，问题：是不是要把序列中的 `[stage]...[action]...` 推掉，只 condition `<task>` 或者 `<task><plan>` 预测新的 langact"
 
 **答：是的，需要"推掉"**。具体实现两种等价方法：
 
@@ -174,12 +174,12 @@ new_reasoning, new_langact = ar_decode(kv_cache, max_steps=64)
 **方法 B — 保留 KV cache + 屏蔽 attention（推荐熟悉后优化）**
 ```python
 # 保留 KV cache 不变，但生成新 phase 的 token 时使用一个特殊 attention mask:
-# 新 token 只能 attend [image, task, plan]，不能 attend 旧的 [think][action]
-# 实现: 给 KV cache 中旧 [think][action] 段位置的 attention 设为 False
+# 新 token 只能 attend [image, task, plan]，不能 attend 旧的 [stage][action]
+# 实现: 给 KV cache 中旧 [stage][action] 段位置的 attention 设为 False
 ```
 更高效（避免重算 image SigLIP），但需要精确管理 mask 边界。
 
-**训练侧自然支持**：因为训练时每个样本就是 `(image_t, task, plan, subtask_reason_at_t, subtask_at_t)`，模型从来没见过"前 phase 的 [think][action] 在 prefix 里"的情况，所以推理时不放进去也是分布内的。
+**训练侧自然支持**：因为训练时每个样本就是 `(image_t, task, plan, subtask_reason_at_t, subtask_at_t)`，模型从来没见过"前 phase 的 [stage][action] 在 prefix 里"的情况，所以推理时不放进去也是分布内的。
 
 ### 用户提到的"使用 bridge 不使用 action 数据，只训练 expert 0"
 
@@ -348,7 +348,7 @@ class BridgeECoTDataset:
 
 **关键设计**：
 - `prompt = task + " [plan] " + plan` —— 把 plan 拼到 prompt 字符串末尾，由 prompt module 整体作为持久 prefix
-- `language_actions = subtask_reason` —— 走现有 `[think]` 段路径（tokenizer 现有的 reasoning 字段）
+- `language_actions = subtask_reason` —— 走现有 `[stage]` 段路径（tokenizer 现有的 reasoning 字段）
 - `langact = subtask` —— 走我们新加的 `[action]` 段路径
 - 不需要 action / state / wrist_image —— 单 expert 架构会忽略
 
@@ -464,15 +464,15 @@ def build_ecot_to_lerobot_mapping():
 
 | 方案 | prompt 内容 | AR 目标内容 | 优点 | 缺点 |
 |------|-----------|------------|------|------|
-| **A. plan 为输入** (当前已实现) | `task + " [plan] " + plan` | `[think]<reasoning>[action]<langact>` | 简单、AR 目标短、训练快 | 推理时 plan 从哪来？需要外部生成 |
-| **B. plan 合并进 [think]** | `task` | `[think]<plan>; <subtask_reason>[action]<langact>` | 不改 tokenizer | plan 与 reasoning 混在一起，无独立粒度控制 |
-| **C. plan 独立 [plan] 段（新加 tokenizer 段）** | `task` | `[plan]<plan>[think]<subtask_reason>[action]<langact>` | 干净三段，可独立 loss 加权 | 需要扩 tokenizer，工程量大 |
+| **A. plan 为输入** (当前已实现) | `task + " [plan] " + plan` | `[stage]<reasoning>[action]<langact>` | 简单、AR 目标短、训练快 | 推理时 plan 从哪来？需要外部生成 |
+| **B. plan 合并进 [stage]** | `task` | `[stage]<plan>; <subtask_reason>[action]<langact>` | 不改 tokenizer | plan 与 reasoning 混在一起，无独立粒度控制 |
+| **C. plan 独立 [plan] 段（新加 tokenizer 段）** | `task` | `[plan]<plan>[stage]<subtask_reason>[action]<langact>` | 干净三段，可独立 loss 加权 | 需要扩 tokenizer，工程量大 |
 
-### 10.2 推荐：**方案 B（plan 合并进 [think] 段）**
+### 10.2 推荐：**方案 B（plan 合并进 [stage] 段）**
 
 理由：
 1. **推理时模型自给自足** — 给定 task 就能产出完整 plan + reasoning + langact，不依赖外部 plan 来源（解决方案 A 的推理痛点）
-2. **不改 tokenizer** — 复用现有 `[think]/[action]` 双段架构，工程改动小
+2. **不改 tokenizer** — 复用现有 `[stage]/[action]` 双段架构，工程改动小
 3. **粒度可调** — 把 plan 当作 reasoning 的"开头部分"，可以用 `reasoning_mask_prob` 做 dropout 削弱权重；也可以在第一帧才包含 plan
 4. **数据驱动** — Bridge ECoT 里 plan 和 subtask_reason 本质都是"思考过程"的语言陈述，合并语义自然
 
@@ -482,21 +482,21 @@ def build_ecot_to_lerobot_mapping():
 
 **B1 — 每帧都 emit plan**
 ```
-[think] {plan}\n{subtask_reason} [action] {subtask}
+[stage] {plan}\n{subtask_reason} [action] {subtask}
 ```
 - 优点：训练数据规整，每个 sample 独立完备
 - 缺点：plan 在一个 episode 内不变，重复 N 次浪费 capacity；模型"学会"在每帧重新预测同一段固定文本，CE loss 被 plan 重复主导
 
 **B2 — 仅第一帧 emit plan，其他帧 skip plan**
 ```
-phase 0 frame 0:    [think] {plan}\n{subtask_reason}_0 [action] {subtask}_0
-phase 0 frame 1+:   [think]                {subtask_reason}_0 [action] {subtask}_0
-phase 1+ all:       [think]                {subtask_reason}_i [action] {subtask}_i
+phase 0 frame 0:    [stage] {plan}\n{subtask_reason}_0 [action] {subtask}_0
+phase 0 frame 1+:   [stage]                {subtask_reason}_0 [action] {subtask}_0
+phase 1+ all:       [stage]                {subtask_reason}_i [action] {subtask}_i
 ```
 - 优点：避免重复 plan，训练效率高
 - 缺点：dataloader 要标注 `is_first_frame_of_episode` 字段；推理时也要决定何时 emit plan
 
-**推荐 B2 的轻量版**：以概率 `p_plan` 在每帧把 plan 加进 [think] 段，否则 skip。建议 `p_plan = 1/n_steps_avg ≈ 1/30 ≈ 0.03`，但为了保证模型见过 plan，初始用 `p_plan=0.1`。
+**推荐 B2 的轻量版**：以概率 `p_plan` 在每帧把 plan 加进 [stage] 段，否则 skip。建议 `p_plan = 1/n_steps_avg ≈ 1/30 ≈ 0.03`，但为了保证模型见过 plan，初始用 `p_plan=0.1`。
 
 ```python
 # In dataloader
@@ -551,8 +551,8 @@ cd policy/lap
 - ✅ ECoT JSON 流式加载（无 OOM）
 - ✅ 三个 phase 切换样本 (Reach → Grasp → Move) 都被正确解析
 - ✅ Prompt 包含 task + `[plan]` + plan 完整文本
-- ✅ Tokenizer 产出 `tokenized_langact_mask`（reasoning + langact 联合）和 `tokenized_reasoning_mask`（仅 reasoning）
-- ✅ Decode 验证：解码出的 [think] 段和 [action] 段文本与输入完全一致
+- ✅ Tokenizer 产出 `tokenized_ar_target_mask`（reasoning + langact 联合）和 `tokenized_stage_mask`（仅 reasoning）
+- ✅ Decode 验证：解码出的 [stage] 段和 [action] 段文本与输入完全一致
 - ✅ Mask 互斥性 assert 通过
 
 ### 未实现部分（按优先级）
@@ -620,7 +620,7 @@ loader = create_data_loader(cfg)
 batch = next(iter(loader))
 obs, actions = batch
 print('obs.tokenized_prompt.shape:', obs.tokenized_prompt.shape)
-print('obs.tokenized_langact_mask sum/sample:', obs.tokenized_langact_mask.sum(axis=-1))
+print('obs.tokenized_ar_target_mask sum/sample:', obs.tokenized_ar_target_mask.sum(axis=-1))
 print('actions.shape:', actions.shape, '(expected (B, 1, 7) all zeros)')
 "
 ```

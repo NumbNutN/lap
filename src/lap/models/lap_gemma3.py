@@ -285,11 +285,11 @@ class LAPGemma3(LAP):
         # Get text masks
         token_mask = obs.tokenized_prompt_mask
         # Attention pattern for text tokens:
-        # - Prompt tokens (tokenized_langact_mask=False): ar_mask=False → bidirectional
-        # - Langact tokens (tokenized_langact_mask=True): ar_mask=True → causal
+        # - Prompt tokens (tokenized_ar_target_mask=False): ar_mask=False → bidirectional
+        # - AR-target tokens (tokenized_ar_target_mask=True): ar_mask=True → causal
         # - Image placeholders will be set to ar_mask=False in _replace_placeholders
-        if obs.tokenized_langact_mask is not None:
-            token_ar_mask = obs.tokenized_langact_mask
+        if obs.tokenized_ar_target_mask is not None:
+            token_ar_mask = obs.tokenized_ar_target_mask
         else:
             token_ar_mask = jnp.zeros_like(token_mask, dtype=bool)
 
@@ -319,16 +319,21 @@ class LAPGemma3(LAP):
         prefix_mask: at.Bool[at.Array, "b s"],
         observation: CoTObservation | Observation,
     ) -> at.Bool[at.Array, "b s"]:
-        """Build prefix mask for action attention, excluding langact tokens.
+        """Build prefix mask for action attention, excluding all AR-target tokens.
 
-        Action tokens should attend to images + prompt, but NOT langact tokens.
-        For Gemma3, images are embedded inline (via placeholders) so prefix length
-        equals tokenized_prompt length - no separate image prefix adjustment needed.
+        For Gemma3 we keep the original "lap_original" semantics: block the entire
+        ``tokenized_ar_target_mask`` (= plan ∪ stage ∪ action) from the action
+        expert. Cascade-VLA segmented modes are not yet wired through Gemma3 —
+        if you need them, mirror the multi-segment logic from
+        ``LAP._build_prefix_action_mask`` here.
+
+        Note: images are embedded inline via placeholders in Gemma3, so prefix
+        length equals tokenized_prompt length and no separate image-prefix
+        adjustment is needed.
         """
-        if observation.tokenized_langact_mask is None:
+        if observation.tokenized_ar_target_mask is None:
             return prefix_mask
-        # Return True for images + prompt (non-langact), False for langact
-        return jnp.logical_and(prefix_mask, jnp.logical_not(observation.tokenized_langact_mask))
+        return jnp.logical_and(prefix_mask, jnp.logical_not(observation.tokenized_ar_target_mask))
 
     # ============ Override: compute_loss hook ============
 

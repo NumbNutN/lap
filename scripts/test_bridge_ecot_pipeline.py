@@ -67,54 +67,62 @@ def main():
         print(f"  langact         : {sample['langact']!r}")
         print(f"  image.shape     : {sample['image'].shape} {sample['image'].dtype}")
 
-        # Run through the two-segment tokenizer.
+        # Run through the cascade-VLA segmented tokenizer.
         (
             tokens,
             attn_mask,
-            langact_mask,
+            ar_target_mask,
             number_mask,
             direction_mask,
             token_loss_mask,
-            reasoning_only_mask,
+            stage_mask,
+            plan_mask,
         ) = tokenizer.tokenize(
             prompt=sample["prompt"],
             reasoning=sample["language_actions"],
-            state=None,  # bridge has no state vector
+            state=None,  # Bridge ECoT has no state vector
+            plan=sample.get("plan"),
+            plan_position=sample.get("plan_position", "none"),
             langact=sample["langact"],
             is_vqa_sample=False,
             is_prediction_sample=False,
         )
 
         n_valid = int(attn_mask.sum())
-        n_lang = int(langact_mask.sum()) if langact_mask is not None else 0
-        n_reason = int(reasoning_only_mask.sum()) if reasoning_only_mask is not None else 0
-        n_action = n_lang - n_reason
+        n_ar = int(ar_target_mask.sum()) if ar_target_mask is not None else 0
+        n_plan = int(plan_mask.sum()) if plan_mask is not None else 0
+        n_stage = int(stage_mask.sum()) if stage_mask is not None else 0
+        n_action = n_ar - n_stage - n_plan
         print(f"  tokens.shape    : {tokens.shape}  valid={n_valid}/{len(tokens)}")
-        print(f"  langact_mask    : {n_lang} positions  (= reasoning + langact)")
-        print(f"  reasoning_only  : {n_reason} positions")
-        print(f"  langact_only    : {n_action} positions  (= langact_mask & ~reasoning_mask)")
+        print(f"  plan_position   : {sample.get('plan_position', 'none')}")
+        print(f"  ar_target_mask  : {n_ar} positions  (= plan + stage + action)")
+        print(f"    plan_mask     : {n_plan} positions")
+        print(f"    stage_mask    : {n_stage} positions")
+        print(f"    action_only   : {n_action} positions  (= ar_target & ~stage & ~plan)")
 
-        # Sanity: the two segment masks must not overlap.
-        if reasoning_only_mask is not None:
-            overlap = (reasoning_only_mask & np.logical_not(langact_mask)).sum()
-            assert overlap == 0, f"reasoning_mask leaks outside langact_mask ({overlap} pos)"
-            # langact_only inside ar_mask
-            langact_only = langact_mask & np.logical_not(reasoning_only_mask)
-            assert (langact_only & reasoning_only_mask).sum() == 0
-            print(f"  ✓ masks disjoint: reasoning ∩ langact_only = empty")
+        # Sanity: stage and plan masks must not overlap; both subsets of ar_target.
+        if stage_mask is not None:
+            assert (stage_mask & np.logical_not(ar_target_mask)).sum() == 0
+        if plan_mask is not None:
+            assert (plan_mask & np.logical_not(ar_target_mask)).sum() == 0
+        if stage_mask is not None and plan_mask is not None:
+            assert (stage_mask & plan_mask).sum() == 0
+        print(f"  ✓ masks disjoint: plan ∩ stage = ∅,  plan ⊂ ar_target,  stage ⊂ ar_target")
 
-        # Decode the reasoning + langact spans for human inspection.
-        reasoning_token_ids = tokens[reasoning_only_mask] if reasoning_only_mask is not None else []
-        langact_only_mask = (
-            langact_mask & np.logical_not(reasoning_only_mask)
-            if reasoning_only_mask is not None
-            else langact_mask
-        )
-        langact_token_ids = tokens[langact_only_mask] if langact_only_mask is not None else []
-        if len(reasoning_token_ids) > 0:
-            print(f"  decoded[think]  : {tokenizer.decode(np.asarray(reasoning_token_ids))!r}")
-        if len(langact_token_ids) > 0:
-            print(f"  decoded[action] : {tokenizer.decode(np.asarray(langact_token_ids))!r}")
+        # Decode each AR span for human inspection.
+        if plan_mask is not None and n_plan > 0:
+            plan_ids = tokens[plan_mask]
+            print(f"  decoded[plan]   : {tokenizer.decode(np.asarray(plan_ids))!r}")
+        if stage_mask is not None and n_stage > 0:
+            stage_ids = tokens[stage_mask]
+            print(f"  decoded[stage]  : {tokenizer.decode(np.asarray(stage_ids))!r}")
+        action_only_mask = ar_target_mask
+        if stage_mask is not None:
+            action_only_mask = action_only_mask & np.logical_not(stage_mask)
+        if plan_mask is not None:
+            action_only_mask = action_only_mask & np.logical_not(plan_mask)
+        if action_only_mask is not None and action_only_mask.sum() > 0:
+            print(f"  decoded[action] : {tokenizer.decode(np.asarray(tokens[action_only_mask]))!r}")
         print()
 
     print("Done. Pipeline plumbing OK.")

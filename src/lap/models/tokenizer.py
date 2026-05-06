@@ -40,6 +40,17 @@ PromptFormatLiteral: TypeAlias = Literal[
 ]
 PredictionFormatLiteral: TypeAlias = Literal["default", "grouped"]
 
+# Plan-as-AR-target switch (per-sample). See PaligemmaTokenizer.tokenize.
+# - "target": ``prompt = <task> [plan]`` (marker only, no plan text).
+#             AR target starts with ``<plan_text> [stage] ... [action] ...``.
+#             The model is trained to *generate* the plan from task+image.
+# - "prompt": ``prompt = <task> [plan] <plan_text>`` (ground-truth plan in prompt).
+#             AR target is ``[stage] ... [action] ...`` only — the model uses
+#             the given plan to ground its stage reasoning, no plan generation.
+# - "none":   no plan involved (legacy single-segment mode); the [plan] marker
+#             is omitted entirely. Used when a sample has no plan text.
+PlanPosition: TypeAlias = Literal["target", "prompt", "none"]
+
 
 def _load_sentencepiece_tokenizer(model_path: str) -> sentencepiece.SentencePieceProcessor:
     """Load a SentencePiece tokenizer from a local/remote path."""
@@ -146,46 +157,77 @@ class BaseTokenizer(ABC):
     def _create_segmented_masks(
         self,
         token_count: int,
-        reasoning_start: int,
-        reasoning_end: int,
-        langact_start: int,
-        langact_end: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Create masks for the cascade-VLA two-segment ``[think] ... [action] ...`` layout.
+        plan_start: int,
+        plan_end: int,
+        stage_start: int,
+        stage_end: int,
+        action_start: int,
+        action_end: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Create masks for the cascade-VLA three-segment layout.
+
+        Layout (any combination of segments may be empty/zero-length):
+
+            ``[plan] <plan_text> [stage] <reasoning> [action] <langact>``
 
         Args:
             token_count: number of tokens before right-padding.
-            reasoning_start/end: index range covering the [think] segment.
-            langact_start/end: index range covering the [action] segment.
+            plan_start/end:   index range covering the ``[plan]<plan_text>`` segment
+                              (only non-empty in plan-as-target mode).
+            stage_start/end:  index range covering the ``[stage]<reasoning>`` segment.
+            action_start/end: index range covering the ``[action]<langact>`` segment.
 
         Returns:
-            (attn_mask, ar_mask, reasoning_only_mask, token_loss_mask)
+            (attn_mask, ar_target_mask, plan_mask, stage_mask, token_loss_mask)
             - attn_mask: True for non-pad positions.
-            - ar_mask: True for both reasoning and langact (everything the model
-              autoregressively predicts). Used for ar attention + CE loss target.
-            - reasoning_only_mask: True for [think] positions only. Used by the
-              action attention block mask and the partial stop_gradient path.
-            - token_loss_mask: initialized to all True.
+            - ar_target_mask: True for the union of plan + stage + action positions.
+              This is the union of all autoregressively-predicted tokens, used for
+              causal attention and as the next-token CE loss target.
+            - plan_mask: True for [plan] segment only. Used optionally by
+              `cascade_unmask_plan` to keep plan visible to the action expert.
+            - stage_mask: True for [stage] segment only. Always blocked from the
+              action expert in `unmask_langact` mode.
+            - token_loss_mask: initialized to all True (reasoning dropout applied
+              by ``_apply_reasoning_dropout`` later).
+
+        Note:
+            The literal segment markers (``[plan]``, ``[stage]``, ``[action]``)
+            are encoded as text and live BETWEEN the spans; they are not covered
+            by any of the per-segment masks. They are part of ``attn_mask`` (so
+            they are valid positions for attention) but their CE loss participates
+            via ``ar_target_mask`` only when they fall inside one of the spans —
+            which by construction they do not.
         """
         attn_mask = np.zeros(self._max_len, dtype=bool)
         token_loss_mask = np.ones(self._max_len, dtype=bool)
-        ar_mask = np.zeros(self._max_len, dtype=bool)
-        reasoning_only_mask = np.zeros(self._max_len, dtype=bool)
+        ar_target_mask = np.zeros(self._max_len, dtype=bool)
+        plan_mask = np.zeros(self._max_len, dtype=bool)
+        stage_mask = np.zeros(self._max_len, dtype=bool)
 
         attn_mask[:token_count] = True
 
-        r_s = max(0, min(self._max_len, reasoning_start))
-        r_e = max(0, min(self._max_len, reasoning_end))
-        if r_e > r_s:
-            reasoning_only_mask[r_s:r_e] = True
-            ar_mask[r_s:r_e] = True
+        # [plan] segment.
+        p_s = max(0, min(self._max_len, plan_start))
+        p_e = max(0, min(self._max_len, plan_end))
+        if p_e > p_s:
+            plan_mask[p_s:p_e] = True
+            ar_target_mask[p_s:p_e] = True
 
-        l_s = max(0, min(self._max_len, langact_start))
-        l_e = max(0, min(self._max_len, langact_end))
-        if l_e > l_s:
-            ar_mask[l_s:l_e] = True
+        # [stage] segment.
+        s_s = max(0, min(self._max_len, stage_start))
+        s_e = max(0, min(self._max_len, stage_end))
+        if s_e > s_s:
+            stage_mask[s_s:s_e] = True
+            ar_target_mask[s_s:s_e] = True
 
-        return attn_mask, ar_mask, reasoning_only_mask, token_loss_mask
+        # [action] segment (no dedicated mask exposed; recoverable as
+        # ar_target_mask & ~plan_mask & ~stage_mask).
+        a_s = max(0, min(self._max_len, action_start))
+        a_e = max(0, min(self._max_len, action_end))
+        if a_e > a_s:
+            ar_target_mask[a_s:a_e] = True
+
+        return attn_mask, ar_target_mask, plan_mask, stage_mask, token_loss_mask
 
     def _apply_reasoning_dropout(
         self,
@@ -291,6 +333,8 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
         state: np.ndarray | None = None,
         state_type: str | None = None,
         *,
+        plan: str | None = None,
+        plan_position: PlanPosition = "none",
         langact: str | None = None,
         is_vqa_sample: bool = False,
         is_prediction_sample: bool = False,
@@ -298,31 +342,46 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
         frame_description: str = "robot base frame",
         state_dropout: float = 0.0,
     ) -> tuple[
-        np.ndarray,             # tokens
-        np.ndarray,             # attn_mask
-        np.ndarray | None,      # langact_mask (= ar_mask, covers reasoning + langact in two-seg mode)
-        np.ndarray | None,      # number_mask
-        np.ndarray | None,      # direction_mask
-        np.ndarray | None,      # token_loss_mask
-        np.ndarray | None,      # reasoning_only_mask (None in legacy single-segment mode)
+        np.ndarray,             # 0: tokens
+        np.ndarray,             # 1: attn_mask
+        np.ndarray | None,      # 2: ar_target_mask (= plan ∪ stage ∪ action)
+        np.ndarray | None,      # 3: number_mask
+        np.ndarray | None,      # 4: direction_mask
+        np.ndarray | None,      # 5: token_loss_mask
+        np.ndarray | None,      # 6: stage_mask  (renamed from reasoning_only_mask)
+        np.ndarray | None,      # 7: plan_mask
     ]:
-        """Tokenize prompt and reasoning for chain-of-thought model.
+        """Tokenize prompt + reasoning + langact + plan into the cascade-VLA layout.
 
-        Single-segment legacy mode (langact=None):
-            ``[BOS] <formatted_prompt> <reasoning> [EOS] [PAD]...``
-            The returned `langact_mask` covers <reasoning>, `reasoning_only_mask` is None.
-            This preserves backward compatibility with the original LAP behaviour.
+        There are three calling contexts. The choice of which to use is controlled
+        by the combination of ``langact`` (None vs string) and ``plan_position``:
 
-        Two-segment cascade-VLA mode (langact is a string):
-            ``[BOS] <formatted_prompt> <reasoning> [action] <langact> [EOS] [PAD]...``
-            `langact_mask` covers BOTH the reasoning and langact tokens (used as
-            ar_mask + CE loss target). `reasoning_only_mask` covers only the
-            reasoning portion (used by the action attention block mask and the
-            partial stop_gradient path).
+        Context 1 — *Legacy single-segment* (no langact, no plan)
+            ``langact=None``, ``plan_position="none"``.
+            Layout: ``[BOS] <formatted_prompt> <reasoning> [EOS] [PAD]...``.
+            Used by the original LAP RLDS / LIBERO training paths that have not
+            been migrated to cascade-VLA yet. ``stage_mask`` and ``plan_mask``
+            are returned as None; ``ar_target_mask`` covers the whole reasoning
+            span (preserving back-compat with the legacy ``langact_mask``
+            semantics in CoTObservation).
 
-        The `[action]` separator is a literal text marker whose tokens fall in
-        between the reasoning and langact spans; it is NOT counted as either
-        reasoning or langact, so neither mask covers it.
+        Context 2 — *Cascade-VLA, plan in prompt* (1 - p_plan path during Bridge pretraining)
+            ``langact`` is a string, ``plan_position="prompt"``.
+            Layout: ``[BOS] <formatted_prompt> [plan] <plan_text> [stage] <reasoning> [action] <langact> [EOS]``.
+            The ground-truth plan is given to the model as input; the AR target
+            covers only ``[stage]<reasoning>`` and ``[action]<langact>``.
+            ``plan_mask`` is None (plan is in prompt, not predicted).
+
+        Context 3 — *Cascade-VLA, plan as target* (p_plan path during Bridge pretraining)
+            ``langact`` is a string, ``plan_position="target"``.
+            Layout: ``[BOS] <formatted_prompt> [plan] <plan_text> [stage] <reasoning> [action] <langact> [EOS]``.
+            The same prompt-side ``[plan]`` marker appears, but ``<plan_text>``
+            now lives in the AR target span. The AR target covers all three
+            segments. ``plan_mask`` covers just the ``<plan_text>`` span.
+
+        The literal segment markers (``[plan]``, ``[stage]``, ``[action]``) are
+        encoded as text and sit BETWEEN the spans; they are inside ``attn_mask``
+        but never counted by any per-segment mask.
         """
         fmt = self._resolve_format(is_vqa_sample, is_prediction_sample)
 
@@ -335,56 +394,92 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
             state_dropout=state_dropout,
         )
 
-        # Tokenize
+        # Tokenize the prompt portion.
         pad_id = self._tokenizer.pad_id()
         tokens = self._tokenizer.encode(formatted_prompt, add_bos=True, add_eos=False)
 
-        reasoning_start = len(tokens)
-        if reasoning is not None:
-            clean_reason = reasoning.strip().replace("_", " ").replace("\n", " ")
-            # In two-segment mode we suppress EOS here; EOS is appended after langact below.
-            add_eos_for_reasoning = langact is None
-            tokens += self._tokenizer.encode(clean_reason, add_bos=False, add_eos=add_eos_for_reasoning)
-        reasoning_end = len(tokens)
+        # Insert the [plan] segment — marker is always present when plan is involved.
+        # If plan_position == "prompt", plan_text follows the marker inside the prompt.
+        # If plan_position == "target", plan_text starts the AR target span.
+        plan_start = len(tokens)
+        plan_end = len(tokens)
+        if plan_position != "none" and plan is not None and plan.strip():
+            plan_marker_tokens = self._tokenizer.encode(" [plan] ", add_bos=False, add_eos=False)
+            tokens += plan_marker_tokens
+            clean_plan = plan.strip().replace("_", " ").replace("\n", " ")
+            plan_text_tokens = self._tokenizer.encode(clean_plan, add_bos=False, add_eos=False)
+            plan_text_start = len(tokens)
+            tokens += plan_text_tokens
+            plan_text_end = len(tokens)
+            if plan_position == "target":
+                # plan_text is part of AR target.
+                plan_start, plan_end = plan_text_start, plan_text_end
+            # else "prompt": plan_text stays in prompt; plan_mask remains empty (start==end).
 
-        # Two-segment cascade-VLA mode: append [action] separator + langact + EOS.
-        langact_start = reasoning_end
-        langact_end = reasoning_end
+        # [stage] segment (=stage reasoning, always AR target when present).
+        stage_start = len(tokens)
+        stage_end = len(tokens)
+        if reasoning is not None:
+            stage_marker = self._tokenizer.encode(" [stage] ", add_bos=False, add_eos=False)
+            tokens += stage_marker
+            clean_reason = reasoning.strip().replace("_", " ").replace("\n", " ")
+            stage_start = len(tokens)
+            # Suppress EOS here when langact follows; EOS goes after [action] span.
+            tokens += self._tokenizer.encode(
+                clean_reason, add_bos=False, add_eos=(langact is None)
+            )
+            stage_end = len(tokens)
+
+        # [action] segment (=langact, always AR target when present).
+        action_start = len(tokens)
+        action_end = len(tokens)
         if langact is not None:
-            # The literal "[action]" marker is encoded but excluded from both masks.
-            sep_tokens = self._tokenizer.encode(" [action] ", add_bos=False, add_eos=False)
-            tokens += sep_tokens
-            langact_start = len(tokens)
+            action_marker = self._tokenizer.encode(" [action] ", add_bos=False, add_eos=False)
+            tokens += action_marker
+            action_start = len(tokens)
             clean_langact = langact.strip().replace("_", " ").replace("\n", " ")
             tokens += self._tokenizer.encode(clean_langact, add_bos=False, add_eos=True)
-            langact_end = len(tokens)
+            action_end = len(tokens)
 
-        # Truncate to max length and clamp segment indices.
+        # Truncate to max length and clamp all segment indices.
         if len(tokens) > self._max_len:
             tokens = tokens[: self._max_len]
-            reasoning_end = min(reasoning_end, self._max_len)
-            langact_start = min(langact_start, self._max_len)
-            langact_end = min(langact_end, self._max_len)
+            plan_start = min(plan_start, self._max_len)
+            plan_end = min(plan_end, self._max_len)
+            stage_start = min(stage_start, self._max_len)
+            stage_end = min(stage_end, self._max_len)
+            action_start = min(action_start, self._max_len)
+            action_end = min(action_end, self._max_len)
 
-        if langact is None:
-            # Legacy single-segment path: langact_mask covers the (single) reasoning span.
-            attn_mask, langact_mask, token_loss_mask = self._create_base_masks(
-                len(tokens), reasoning_start, reasoning_end, reasoning is not None
+        # Branch: legacy single-segment path (back-compat) vs new segmented path.
+        is_legacy = (langact is None) and (plan_position == "none")
+        if is_legacy:
+            # Legacy: ar_target_mask covers reasoning span only; stage/plan are None.
+            attn_mask, ar_target_mask, token_loss_mask = self._create_base_masks(
+                len(tokens), stage_start, stage_end, reasoning is not None
             )
-            reasoning_only_mask = None
+            stage_mask = None
+            plan_mask = None
         else:
-            attn_mask, langact_mask, reasoning_only_mask, token_loss_mask = self._create_segmented_masks(
-                len(tokens), reasoning_start, reasoning_end, langact_start, langact_end
+            attn_mask, ar_target_mask, plan_mask, stage_mask, token_loss_mask = (
+                self._create_segmented_masks(
+                    len(tokens),
+                    plan_start, plan_end,
+                    stage_start, stage_end,
+                    action_start, action_end,
+                )
             )
 
-        if langact_mask is None:
+        if ar_target_mask is None or not ar_target_mask.any():
             number_mask = None
             direction_mask = None
         else:
-            token_loss_mask = self._apply_reasoning_dropout(token_loss_mask, langact_mask, is_vqa_sample)
-            number_mask, direction_mask = self._build_number_direction_masks(tokens, langact_mask, fmt, is_vqa_sample)
+            token_loss_mask = self._apply_reasoning_dropout(token_loss_mask, ar_target_mask, is_vqa_sample)
+            number_mask, direction_mask = self._build_number_direction_masks(
+                tokens, ar_target_mask, fmt, is_vqa_sample
+            )
 
-        # Right pad
+        # Right pad.
         pad_count = self._max_len - len(tokens)
         if pad_count > 0:
             tokens = tokens + [pad_id] * pad_count
@@ -392,11 +487,12 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
         return (
             np.asarray(tokens, dtype=np.int32),
             attn_mask,
-            langact_mask,
+            ar_target_mask,
             number_mask,
             direction_mask,
             token_loss_mask,
-            reasoning_only_mask,
+            stage_mask,
+            plan_mask,
         )
 
     def decode(self, tokens: np.ndarray) -> str:
@@ -589,9 +685,11 @@ class Gemma3Tokenizer(BaseTokenizer):
         if pad_count > 0:
             tokens = tokens + [pad_id] * pad_count
 
-        # Two-segment cascade-VLA mode is not supported in Gemma3Tokenizer yet;
-        # return None for reasoning_only_mask to keep the tuple shape consistent
-        # with PaligemmaTokenizer.tokenize.
+        # Cascade-VLA segmented mode is not supported in Gemma3Tokenizer yet;
+        # return None for stage_mask and plan_mask to keep the tuple shape
+        # consistent with PaligemmaTokenizer.tokenize. The 3rd entry
+        # (ar_target_mask) covers the reasoning span as in legacy single-segment
+        # mode.
         return (
             np.asarray(tokens, dtype=np.int32),
             attn_mask,
@@ -599,7 +697,8 @@ class Gemma3Tokenizer(BaseTokenizer):
             number_mask,
             direction_mask,
             token_loss_mask,
-            None,
+            None,  # stage_mask (was reasoning_only_mask)
+            None,  # plan_mask (new)
         )
 
     def decode(self, tokens: np.ndarray, skip_special_tokens: bool = True) -> str:
@@ -685,16 +784,19 @@ class FASTTokenizerMixin:
         state_dropout: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Handle VQA and prediction samples using language-based tokenization."""
-        # NOTE: VQA / prediction samples always use single-segment legacy mode, so
-        # `reasoning_only_mask` from the new tokenize signature is unused here.
+        # NOTE: VQA / prediction samples always use legacy single-segment mode
+        # (no plan/stage/action split), so plan_mask and stage_mask are unused
+        # here. The 3rd return position is `ar_target_mask` (legacy alias of
+        # the old `langact_mask`), still covering the full reasoning span.
         (
             tokens,
             attn_mask,
-            reasoning_mask,
+            ar_target_mask,
             _number_mask,
             _direction_mask,
             token_loss_mask,
-            _reasoning_only_mask,
+            _stage_mask,
+            _plan_mask,
         ) = self.tokenize(
             prompt=prompt,
             reasoning=language_actions,
@@ -706,11 +808,14 @@ class FASTTokenizerMixin:
             frame_description=frame_description,
             state_dropout=state_dropout,
         )
-        # Map outputs to FAST format
-        ar_mask = reasoning_mask if reasoning_mask is not None else np.zeros(len(tokens), dtype=bool)
+        # Map outputs to FAST format. In legacy single-segment mode the
+        # `ar_target_mask` covers the reasoning span (same role as the old
+        # `reasoning_mask`); use it as the FAST AR mask + as a loss-mask
+        # restriction so we only train on the reasoning span.
+        ar_mask = ar_target_mask if ar_target_mask is not None else np.zeros(len(tokens), dtype=bool)
         loss_mask = token_loss_mask if token_loss_mask is not None else np.ones(len(tokens), dtype=bool)
-        if reasoning_mask is not None:
-            loss_mask = np.logical_and(loss_mask, reasoning_mask)
+        if ar_target_mask is not None:
+            loss_mask = np.logical_and(loss_mask, ar_target_mask)
 
         return (tokens, attn_mask, ar_mask, loss_mask)
 

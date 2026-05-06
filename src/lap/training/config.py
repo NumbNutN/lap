@@ -343,6 +343,11 @@ class BridgeECoTDataConfig(BaseDataConfigFactory):
 
     # Format options.
     include_plan: bool = True
+    # Probability per-frame that the plan is emitted as AR target (instead of being
+    # passed in as ground-truth in the prompt). At p_plan=0.15 each ~30-frame Bridge
+    # episode sees plan-as-target ~4-5 times — enough supervision signal without
+    # dominating the loss. See cascade-bridge-pretraining-discussion.md §10.
+    p_plan: float = 0.15
     skip_steps_without_change: bool = False  # If True, dedupe consecutive identical phases.
     max_episodes: int | None = None  # Cap episodes for smoke tests.
 

@@ -13,7 +13,7 @@
 - **LM head**：把 hidden state 投影到词表空间的输出层
 - **Hidden state $h$**：trunk 在 langact 位置输出的连续向量
 - **prompt**：任务级描述，例 `Arrange the blocks into a horizontal line.`
-- **reasoning** ([think] / Subgoal)：高层规划，例 `Place the red block at the leftmost slot of the line.`
+- **reasoning** ([stage] / Subgoal)：高层规划，例 `Place the red block at the leftmost slot of the line.`
 - **langact** ([action] / Step)：低层语言动作描述，例 `Move the left gripper above the red block.`
 - 数据格式参考：[data/arrange_blocks_line/demo_clean/metadata/episode0.json](data/arrange_blocks_line/demo_clean/metadata/episode0.json)
 
@@ -217,7 +217,7 @@ $$
 
 ```
 [BOS] [prompt] task_prompt
-      [think]  reasoning (Subgoal: 高层规划)
+      [stage]  reasoning (Subgoal: 高层规划)
       [action] langact   (Step: 低层语言动作描述)
       [EOS] [PAD]...
 ```
@@ -359,17 +359,17 @@ def langact_for_action_training(model, batch, p_self_gen, train_step, total_step
 ```python
 def _build_prefix_action_mask(self, prefix_mask, observation):
     """新行为：action 屏蔽 reasoning，但能 attend langact"""
-    if observation.tokenized_reasoning_mask is None:
+    if observation.tokenized_stage_mask is None:
         return prefix_mask
-    img_seq_len = prefix_mask.shape[1] - observation.tokenized_reasoning_mask.shape[1]
+    img_seq_len = prefix_mask.shape[1] - observation.tokenized_stage_mask.shape[1]
     reasoning_mask_full = jnp.concatenate([
-        jnp.zeros((observation.tokenized_reasoning_mask.shape[0], img_seq_len), dtype=bool),
-        observation.tokenized_reasoning_mask,
+        jnp.zeros((observation.tokenized_stage_mask.shape[0], img_seq_len), dtype=bool),
+        observation.tokenized_stage_mask,
     ], axis=1)
     return jnp.logical_and(prefix_mask, jnp.logical_not(reasoning_mask_full))
 ```
 
-注意：tokenizer 输出现在需要**两个 mask**：`tokenized_reasoning_mask`（[think] 段）和 `tokenized_langact_mask`（[action] 段）。
+注意：tokenizer 输出现在需要**两个 mask**：`tokenized_stage_mask`（[stage] 段）和 `tokenized_ar_target_mask`（[action] 段）。
 
 ### 7.2 改造 `stop_action_to_vlm_grad` 为 token-role 版本
 
@@ -390,7 +390,7 @@ cross_to_expert0_stop = (q_owner != 0) & (k_owner == 0) & stop_grad_role_mask[:,
 ### 7.3 Tokenizer 改造
 
 在 [tokenizer.py](policy/lap/src/lap/models/tokenizer.py) 中需要：
-- 解析 `[think] ... [action] ...` 双段结构
+- 解析 `[stage] ... [action] ...` 双段结构
 - 输出 `reasoning_start/end` 和 `langact_start/end` 两组 index
 - 派生 `reasoning_mask` 和 `langact_mask`（互斥）
 - $L_{lang}$ 在两段都计算（reasoning 和 langact 都要 next-token CE 监督）
@@ -440,7 +440,7 @@ for t in range(num_diffusion_steps):
 
 | 阶段 | 工作 | 预期收益 |
 |------|------|---------|
-| **P0** | Tokenizer 改造支持 `[think]/[action]` 双段；attention mask 改为屏蔽 reasoning | 数据通路打通 |
+| **P0** | Tokenizer 改造支持 `[stage]/[action]` 双段；attention mask 改为屏蔽 reasoning | 数据通路打通 |
 | **P0** | 实现 Variant 0 (LAP baseline，不变) + Variant 2 (Partial) 两端对比 | 验证最关键的 hypothesis：langact 信息瓶颈是否有用 |
 | **P1** | 实现 Variant 1 + Variant 3，做完整四点对比 | 隔离梯度流向各部分的贡献 |
 | **P1** | 推理流程实现 + rollout gap 实验 | 验证 exposure bias 强度 |
@@ -648,7 +648,7 @@ sample_at_frame_t:
 ```
 
 `langact` 通过 `transforms.TokenizePromptAndReasoning` 自动激活双段 tokenizer 路径，
-产出 `tokenized_reasoning_mask` 和 `tokenized_langact_mask`。
+产出 `tokenized_stage_mask` 和 `tokenized_ar_target_mask`。
 
 ### 10.7 推理流程伪代码
 

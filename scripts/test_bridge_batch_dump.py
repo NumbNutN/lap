@@ -73,10 +73,11 @@ def main():
         help="Directory to write inspection PNG/TXT files",
     )
     ap.add_argument(
-        "--plan-as-ar-target",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="If True (default), plan goes into AR target. If False, plan into prompt.",
+        "--p-plan",
+        type=float,
+        default=0.5,  # 0.5 here (vs 0.15 default) so a small dump shows both modes
+        help="Probability per sample that plan is emitted as AR target. "
+             "Set to 1.0 to force plan-as-target, 0.0 to force plan-as-prompt.",
     )
     ap.add_argument(
         "--skip-repeat",
@@ -122,10 +123,9 @@ def main():
         ecot_json_path=DEFAULT_ECOT_BRIDGE_JSON,
         image_loader=image_loader,
         include_plan=True,
+        p_plan=args.p_plan,
         skip_steps_without_change=args.skip_repeat,
     )
-    # Override plan_as_ar_target via the builder.
-    ds._builder.plan_as_ar_target = args.plan_as_ar_target
 
     # 3. Tokenizer
     tokenizer = PaligemmaTokenizer(max_len=args.max_token_len, prompt_format="lap")
@@ -140,15 +140,18 @@ def main():
         (
             tokens,
             attn_mask,
-            langact_mask,
-            number_mask,
-            direction_mask,
-            token_loss_mask,
-            reasoning_only_mask,
+            ar_target_mask,
+            _number_mask,
+            _direction_mask,
+            _token_loss_mask,
+            stage_mask,
+            plan_mask,
         ) = tokenizer.tokenize(
             prompt=sample["prompt"],
             reasoning=sample["language_actions"],
             state=None,
+            plan=sample.get("plan"),
+            plan_position=sample.get("plan_position", "none"),
             langact=sample["langact"],
             is_vqa_sample=False,
             is_prediction_sample=False,
@@ -156,24 +159,33 @@ def main():
 
         # Mask stats.
         n_valid = int(attn_mask.sum())
-        n_lang = int(langact_mask.sum()) if langact_mask is not None else 0
-        n_reason = int(reasoning_only_mask.sum()) if reasoning_only_mask is not None else 0
-        n_action = n_lang - n_reason
-        if reasoning_only_mask is not None:
-            langact_only_mask = langact_mask & np.logical_not(reasoning_only_mask)
-        else:
-            langact_only_mask = langact_mask
+        n_ar = int(ar_target_mask.sum()) if ar_target_mask is not None else 0
+        n_plan = int(plan_mask.sum()) if plan_mask is not None else 0
+        n_stage = int(stage_mask.sum()) if stage_mask is not None else 0
+        n_action = n_ar - n_stage - n_plan
 
-        # Decode AR target spans.
-        decoded_reason = (
-            tokenizer.decode(np.asarray(tokens[reasoning_only_mask]))
-            if reasoning_only_mask is not None
-            else "(no reasoning span)"
+        # Build action-only mask = ar_target & ~stage & ~plan.
+        action_only_mask = ar_target_mask
+        if stage_mask is not None:
+            action_only_mask = action_only_mask & np.logical_not(stage_mask)
+        if plan_mask is not None:
+            action_only_mask = action_only_mask & np.logical_not(plan_mask)
+
+        # Decode each AR span for human inspection.
+        decoded_plan = (
+            tokenizer.decode(np.asarray(tokens[plan_mask]))
+            if plan_mask is not None and n_plan > 0
+            else "(plan in prompt or absent)"
         )
-        decoded_langact = (
-            tokenizer.decode(np.asarray(tokens[langact_only_mask]))
-            if langact_only_mask is not None
-            else "(no langact span)"
+        decoded_stage = (
+            tokenizer.decode(np.asarray(tokens[stage_mask]))
+            if stage_mask is not None and n_stage > 0
+            else "(no stage span)"
+        )
+        decoded_action = (
+            tokenizer.decode(np.asarray(tokens[action_only_mask]))
+            if action_only_mask is not None and action_only_mask.sum() > 0
+            else "(no action span)"
         )
 
         # Save image.
@@ -194,21 +206,25 @@ def main():
             f"  image.shape       : {sample['image'].shape} {sample['image'].dtype}",
             f"  image.png         : {png_path}",
             f"  prompt            : {sample['prompt']!r}",
+            f"  plan_position     : {sample.get('plan_position', 'none')}",
+            f"  plan (raw)        : {sample.get('plan')!r}",
             "",
             "[AR TARGET — what the model is trained to predict]",
-            f"  language_actions  : {sample['language_actions']!r}",
-            f"  langact           : {sample['langact']!r}",
+            f"  language_actions  : {sample['language_actions']!r}  (→ [stage])",
+            f"  langact           : {sample['langact']!r}  (→ [action])",
             "",
             "[TOKENIZER OUTPUT]",
             f"  total tokens      : {len(tokens)}",
             f"  valid (non-pad)   : {n_valid}",
-            f"  langact_mask      : {n_lang} positions  (= reasoning + langact, used for CE loss)",
-            f"    reasoning_only  : {n_reason} positions  ([think] segment, blocked from action attn in unmask_langact mode)",
-            f"    langact_only    : {n_action} positions  ([action] segment)",
+            f"  ar_target_mask    : {n_ar} positions  (= plan + stage + action, used for CE loss)",
+            f"    plan_mask       : {n_plan} positions  ([plan] segment; non-empty only when plan_position='target')",
+            f"    stage_mask      : {n_stage} positions  ([stage] segment; always blocked from action attn in unmask_langact)",
+            f"    action_only     : {n_action} positions  ([action] segment; visible to action attn in unmask_langact)",
             "",
             "[DECODED AR SPANS]",
-            f"  decoded[think]    : {decoded_reason!r}",
-            f"  decoded[action]   : {decoded_langact!r}",
+            f"  decoded[plan]     : {decoded_plan!r}",
+            f"  decoded[stage]    : {decoded_stage!r}",
+            f"  decoded[action]   : {decoded_action!r}",
             "",
             "[FULL TOKEN SEQUENCE (decoded)]",
             f"  {tokenizer.decode(np.asarray(tokens[attn_mask]))!r}",

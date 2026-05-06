@@ -107,6 +107,9 @@ class LAP(_pi0.Pi0):
         # Cascade-VLA toggles. See lap_config.ActionAttentionMode / StopGradMode.
         self.action_attention_mode = getattr(config, "action_attention_mode", "lap_original")
         self.stop_grad_mode = getattr(config, "stop_grad_mode", "off")
+        # Variant 4-5 ablation: when True (and action_attention_mode="unmask_langact"),
+        # the action expert can attend to [plan]<plan_text> in addition to langact.
+        self.cascade_unmask_plan = bool(getattr(config, "cascade_unmask_plan", False))
         vqa_loss_weights_dict = getattr(config, "vqa_loss_weights", None)
         if vqa_loss_weights_dict is not None:
             self.vqa_loss_weights_by_id = {
@@ -154,14 +157,14 @@ class LAP(_pi0.Pi0):
         input_mask.append(obs.tokenized_prompt_mask)
 
         # Attention pattern for text tokens:
-        # - Prompt tokens (tokenized_langact_mask=False): ar_mask=False → bidirectional
-        # - Langact tokens (tokenized_langact_mask=True): ar_mask=True → causal
+        # - Prompt tokens (tokenized_ar_target_mask=False): ar_mask=False → bidirectional
+        # - AR-target tokens (tokenized_ar_target_mask=True): ar_mask=True → causal
         # This allows:
         #   - Images: bidirectional (ar_mask=False)
         #   - Prompt: bidirectional, can attend to images
-        #   - Langact: causal, can attend to images + all prompt
-        if obs.tokenized_langact_mask is not None:
-            ar_mask.append(obs.tokenized_langact_mask)
+        #   - AR-target spans (plan / stage / action): causal, can attend to images + all prompt
+        if obs.tokenized_ar_target_mask is not None:
+            ar_mask.append(obs.tokenized_ar_target_mask)
         else:
             text_ar_mask = jnp.zeros((obs.tokenized_prompt.shape[0], obs.tokenized_prompt.shape[1]), dtype=bool)
             ar_mask.append(text_ar_mask)
@@ -232,7 +235,7 @@ class LAP(_pi0.Pi0):
         logits = self.PaliGemma.llm(pre_logits, method="decode")
 
         loss_mask = jnp.logical_and(
-            observation.tokenized_langact_mask[:, 1:],
+            observation.tokenized_ar_target_mask[:, 1:],
             jnp.logical_and(observation.tokenized_prompt_mask[:, 1:], observation.token_loss_mask[:, 1:]),
         )
         if sample_mask is not None:
@@ -310,31 +313,41 @@ class LAP(_pi0.Pi0):
     ) -> at.Bool[at.Array, "b s"]:
         """Build prefix mask for action attention.
 
-        Behaviour depends on `self.action_attention_mode` (see lap_config):
+        Behaviour depends on `self.action_attention_mode` and `self.cascade_unmask_plan`:
 
-        - "lap_original" (default, backward-compatible):
-            Action attends to image + prompt; both reasoning and langact are blocked.
-            The block target is `observation.tokenized_langact_mask`, which in legacy
-            single-segment mode covers all autoregressive text tokens.
+        - ``"lap_original"`` (default, backward-compatible):
+            Action attends to image + prompt only. The full ``ar_target_mask``
+            (= plan ∪ stage ∪ action segments) is blocked. In legacy
+            single-segment mode this collapses to "block all reasoning tokens".
 
-        - "unmask_langact":
-            Action attends to image + prompt + langact; only the reasoning ([think])
-            segment is blocked. Requires `observation.tokenized_reasoning_mask` to
-            be present (produced by the two-segment tokenizer path). When that mask
-            is missing we silently fall back to "lap_original" behaviour and warn
-            via the python logger so misconfigurations surface during training.
+        - ``"unmask_langact"``:
+            Action attends to image + prompt + ``[action]<langact>``.
+            The ``[stage]<reasoning>`` segment is always blocked.
+            The ``[plan]<plan_text>`` segment is blocked unless
+            ``cascade_unmask_plan=True``, in which case action also sees plan
+            (Variants 4-5: "Unmask-Plan-*"). The ablation tests whether the
+            global plan provides useful conditioning beyond langact alone.
+
+        Falls back to ``"lap_original"`` behaviour with a logged warning if the
+        required segment masks are missing (e.g., a non-cascade data pipeline).
         """
         if self.action_attention_mode == "unmask_langact":
-            block_mask = getattr(observation, "tokenized_reasoning_mask", None)
-            if block_mask is None:
+            stage = getattr(observation, "tokenized_stage_mask", None)
+            plan = getattr(observation, "tokenized_plan_mask", None)
+            if stage is None:
                 logger.warning(
-                    "action_attention_mode='unmask_langact' but tokenized_reasoning_mask "
-                    "is None; falling back to original LAP behaviour (block langact). "
-                    "Make sure your data pipeline emits reasoning_mask via the two-segment tokenizer."
+                    "action_attention_mode='unmask_langact' but tokenized_stage_mask "
+                    "is None; falling back to original LAP behaviour (block all AR target). "
+                    "Make sure your data pipeline emits the segmented masks."
                 )
-                block_mask = observation.tokenized_langact_mask
+                block_mask = observation.tokenized_ar_target_mask
+            else:
+                block_mask = stage
+                # Block plan unless cascade_unmask_plan is True.
+                if plan is not None and not getattr(self, "cascade_unmask_plan", False):
+                    block_mask = jnp.logical_or(block_mask, plan)
         else:  # "lap_original"
-            block_mask = observation.tokenized_langact_mask
+            block_mask = observation.tokenized_ar_target_mask
 
         if block_mask is None:
             return prefix_mask
@@ -358,33 +371,36 @@ class LAP(_pi0.Pi0):
     ) -> at.Bool[at.Array, "b s"] | None:
         """Build per-position mask for partial stop_gradient on VLM->action cross-attn.
 
-        Only relevant when `self.stop_grad_mode == "partial"`. Returns a (B, prefix_len)
-        boolean array where True positions should NOT be detached (gradient flows from
-        action_expert back into VLM trunk through them); False positions follow the
-        usual stop_gradient. Returns None for "off" / "full" modes since the gemma
-        backbone handles those uniformly.
+        Only relevant when ``self.stop_grad_mode == "partial"``. Returns a
+        (B, prefix_len) boolean array where True positions should NOT be detached
+        (gradient flows from the action expert back into the VLM trunk through
+        them); False positions follow the usual stop_gradient. Returns None for
+        "off" / "full" modes since the gemma backbone handles those uniformly.
 
-        For Variant 2 we keep the langact span gradient-flowing and detach everything
-        else (image + prompt + reasoning).
+        For Variant 2 (Cascade-Partial) we keep only the ``[action]<langact>``
+        span gradient-flowing — everything else (image + prompt + plan + stage)
+        is detached. The "langact-only" region is computed as
+        ``ar_target_mask AND NOT stage_mask AND NOT plan_mask``.
         """
         if self.stop_grad_mode != "partial":
             return None
-        # Identify langact-only positions = ar_mask minus reasoning_only_mask.
-        ar_mask = observation.tokenized_langact_mask
-        reasoning_mask = getattr(observation, "tokenized_reasoning_mask", None)
+        ar_mask = observation.tokenized_ar_target_mask
+        stage_mask = getattr(observation, "tokenized_stage_mask", None)
+        plan_mask = getattr(observation, "tokenized_plan_mask", None)
         if ar_mask is None:
             logger.warning(
-                "stop_grad_mode='partial' requires tokenized_langact_mask; got None. "
+                "stop_grad_mode='partial' requires tokenized_ar_target_mask; got None. "
                 "Disabling partial stop_grad for this batch."
             )
             return None
-        if reasoning_mask is None:
-            # Without a reasoning sub-mask we cannot subtract it; treat the whole ar_mask
-            # (langact + reasoning) as the "no stop" region. This is permissive — closer
-            # to Variant 3 than Variant 2 — but keeps training functional.
-            langact_only = ar_mask
-        else:
-            langact_only = jnp.logical_and(ar_mask, jnp.logical_not(reasoning_mask))
+        # Subtract stage and plan masks (if present) from ar_target to isolate
+        # the [action]<langact> span. Anything else inside ar_target stays
+        # detached so only langact tokens act as the gradient bridge.
+        langact_only = ar_mask
+        if stage_mask is not None:
+            langact_only = jnp.logical_and(langact_only, jnp.logical_not(stage_mask))
+        if plan_mask is not None:
+            langact_only = jnp.logical_and(langact_only, jnp.logical_not(plan_mask))
 
         # Pad to full prefix length (image positions are detached as usual).
         img_seq_len = prefix_mask.shape[1] - langact_only.shape[1]
@@ -406,11 +422,13 @@ class LAP(_pi0.Pi0):
     ) -> at.Bool[at.Array, "b _t _s"]:
         """Build combined attention mask for prefix (VLM) and suffix (action expert).
 
-        Current attention pattern (using tokenized_langact_mask as ar_mask):
+        Current attention pattern (using tokenized_ar_target_mask as ar_mask):
         - Image tokens: bidirectional (ar_mask=False)
-        - Prompt tokens: bidirectional (ar_mask=False from tokenized_langact_mask)
-        - Langact tokens: causal (ar_mask=True from tokenized_langact_mask)
-        - Action tokens: causal, can attend to images + prompt, NOT langact
+        - Prompt tokens: bidirectional (ar_mask=False from tokenized_ar_target_mask)
+        - AR-target tokens (plan/stage/action segments): causal (ar_mask=True)
+        - Action expert tokens: causal, attend to images + prompt, plus
+          conditionally to plan/stage/action spans depending on
+          action_attention_mode and cascade_unmask_plan (see _build_prefix_action_mask).
 
         This means images and prompt can attend to each other bidirectionally,
         while langact is causal and can attend to all images + prompt.

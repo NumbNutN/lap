@@ -119,30 +119,42 @@ class NullImageLoader(BridgeV2ImageLoader):
 class BridgeECoTSampleBuilder:
     """Builds a single training sample dict from a (file, episode, step) triple.
 
-    Two layout modes (controlled by ``plan_as_ar_target``):
+    Three layout modes are supported per sample, with the choice between the two
+    plan-bearing modes drawn randomly per sample with probability ``p_plan``:
 
-    - ``plan_as_ar_target=False`` (legacy / "plan-as-input"):
-        prompt = ``"{task} [plan] {plan}"`` (plan shown to model as condition).
-        AR target: ``[think]<subtask_reason>[action]<subtask>``.
-
-    - ``plan_as_ar_target=True`` (recommended for pretraining):
+    - **plan_position="target"** (probability ``p_plan``, default 0.15)
         prompt = ``"{task}"`` (task only).
-        AR target: ``[think]<plan>\\n<subtask_reason>[action]<subtask>``.
-        Plan becomes part of what the model has to predict.
-        See cascade-bridge-pretraining-discussion.md §10 for rationale.
+        AR target: ``[plan] <plan_text> [stage] <subtask_reason> [action] <subtask>``.
+        The model is trained to **generate** the plan from task + image. Triggered
+        at episode-start during cascade rollout.
+
+    - **plan_position="prompt"** (probability ``1 - p_plan``)
+        prompt = ``"{task} [plan] {plan_text}"`` (ground-truth plan in prompt).
+        AR target: ``[stage] <subtask_reason> [action] <subtask>``.
+        The model uses the given plan to ground its stage reasoning. Triggered
+        within an episode after the plan has already been generated.
+
+    - **plan_position="none"** (fallback)
+        Used when ``include_plan=False`` or the sample has no plan text. The plan
+        marker is omitted entirely and the layout reduces to the
+        ``[stage]/[action]`` two-segment form.
+
+    See cascade-bridge-pretraining-discussion.md §10 for the design rationale and
+    PaligemmaTokenizer.tokenize for the three calling contexts.
     """
 
     image_loader: BridgeV2ImageLoader
     include_plan: bool = True
-    # If True, plan is emitted as part of the AR target (concatenated into reasoning).
-    # If False, plan is appended to the prompt text (input-only).
-    plan_as_ar_target: bool = True
-    # Separator inserted between task and plan in the prompt (only used when
-    # plan_as_ar_target=False).
-    plan_separator_prompt: str = " [plan] "
-    # Separator inserted between plan and subtask_reason in the AR target (only used
-    # when plan_as_ar_target=True). Newline keeps them visually distinct in decoded text.
-    plan_separator_ar: str = "\n"
+    # Probability that a sample emits the plan as part of the AR target. The
+    # complement (1 - p_plan) puts the plan in the prompt as ground truth. At
+    # p_plan=0.15 each ~30-frame Bridge episode sees plan-as-target ~4-5 times.
+    p_plan: float = 0.15
+    # RNG used to draw the per-sample plan placement. None → use numpy default RNG.
+    rng: Any = None
+
+    def __post_init__(self):
+        if self.rng is None:
+            self.rng = np.random.default_rng()
 
     def build(
         self,
@@ -165,18 +177,16 @@ class BridgeECoTSampleBuilder:
         subtask = subtask.strip()
         subtask_reason = subtask_reason.strip()
 
-        if self.include_plan and plan and not self.plan_as_ar_target:
-            # Mode A — plan as input to prompt.
-            prompt = f"{task}{self.plan_separator_prompt}{plan}"
-            reasoning_for_ar = subtask_reason
-        elif self.include_plan and plan and self.plan_as_ar_target:
-            # Mode B — plan as AR target (concatenated into reasoning segment).
-            prompt = task
-            reasoning_for_ar = f"{plan}{self.plan_separator_ar}{subtask_reason}"
+        # Choose plan placement.
+        if not self.include_plan or not plan:
+            plan_position = "none"
+            plan_text_for_sample: str | None = None
         else:
-            # No plan available, or plan disabled.
-            prompt = task
-            reasoning_for_ar = subtask_reason
+            if float(self.rng.random()) < self.p_plan:
+                plan_position = "target"
+            else:
+                plan_position = "prompt"
+            plan_text_for_sample = plan
 
         try:
             image = self.image_loader.get(file_path, episode_id, step_idx)
@@ -189,12 +199,18 @@ class BridgeECoTSampleBuilder:
                 f"{image.shape} {image.dtype}; expected (H, W, 3) uint8"
             )
 
+        # The downstream tokenizer (TokenizePromptAndReasoning -> PaligemmaTokenizer)
+        # consumes (prompt, language_actions, langact, plan, plan_position). We pass
+        # the raw `task` as the prompt so the [plan] marker insertion logic lives
+        # entirely inside the tokenizer.
         return {
             "image": image,
             "image_mask": np.bool_(True),
-            "prompt": prompt,
-            "language_actions": reasoning_for_ar,
-            "langact": subtask,
+            "prompt": task,
+            "language_actions": subtask_reason,  # → [stage] segment
+            "langact": subtask,                  # → [action] segment
+            "plan": plan_text_for_sample,        # may be None
+            "plan_position": plan_position,      # "none" | "prompt" | "target"
             # Sample-type flags (cascade-VLA uses these to gate losses).
             "is_vqa_sample": np.bool_(False),
             "is_prediction_sample": np.bool_(False),
@@ -230,6 +246,10 @@ class BridgeECoTDataset:
     ecot_json_path: pathlib.Path = DEFAULT_ECOT_BRIDGE_JSON
     image_loader: BridgeV2ImageLoader = dataclasses.field(default_factory=NullImageLoader)
     include_plan: bool = True
+    # Probability that a per-frame sample emits plan as AR target (vs. in prompt).
+    # See BridgeECoTSampleBuilder for the meaning. Default 0.15 (≈ 4-5 plan-as-
+    # target draws per ~30-frame episode).
+    p_plan: float = 0.15
     skip_steps_without_change: bool = False
     max_episodes: int | None = None
 
@@ -237,6 +257,7 @@ class BridgeECoTDataset:
         self._builder = BridgeECoTSampleBuilder(
             image_loader=self.image_loader,
             include_plan=self.include_plan,
+            p_plan=self.p_plan,
         )
 
     # ----- Streaming iteration -----

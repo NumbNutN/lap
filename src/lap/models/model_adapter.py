@@ -39,15 +39,21 @@ class ExtendedModelType(str, Enum):
 class CoTObservation(_model.Observation[ArrayT], Generic[ArrayT]):
     # --- CoT / vis extras (all optional) ---
     images: dict[str, at.Float[ArrayT, "*b h w c"]]
-    # Mask covering ALL autoregressively-predicted text positions (reasoning + langact).
-    # Used as causal ar_mask for text and as the CE loss target mask.
-    tokenized_langact_mask: at.Bool[ArrayT, "*b l"] | None = None
-    # Mask covering ONLY the [think] (reasoning) segment within the tokenized prompt.
-    # Used by `_build_prefix_action_mask` when action_attention_mode="unmask_langact"
-    # to surgically block reasoning while keeping langact accessible to the action expert.
-    # Also consumed by the gemma backbone's stop_grad_mode="partial" path to identify
-    # which positions should remain gradient-flowing.
-    tokenized_reasoning_mask: at.Bool[ArrayT, "*b l"] | None = None
+    # Mask covering ALL autoregressively-predicted token positions (plan ∪ stage ∪ action).
+    # Used as causal ar_mask for text and as the next-token CE loss target mask.
+    # NOTE: renamed from `tokenized_langact_mask` to make its scope explicit; the legacy
+    # name was misleading because the mask covered *all* AR positions, not just langact.
+    tokenized_ar_target_mask: at.Bool[ArrayT, "*b l"] | None = None
+    # Mask covering ONLY the [stage]<reasoning> segment within the tokenized prompt.
+    # Used by `_build_prefix_action_mask` when action_attention_mode="unmask_langact" to
+    # block stage reasoning while keeping the [action]<langact> accessible to the action
+    # expert. Also consumed by the gemma backbone's stop_grad_mode="partial" path.
+    tokenized_stage_mask: at.Bool[ArrayT, "*b l"] | None = None
+    # Mask covering ONLY the [plan]<plan_text> segment, when plan is emitted as part of
+    # the AR target (cf. `plan_position="target"` in PaligemmaTokenizer.tokenize). Empty
+    # otherwise. Used together with `cascade_unmask_plan` to optionally allow the action
+    # expert to attend to plan tokens.
+    tokenized_plan_mask: at.Bool[ArrayT, "*b l"] | None = None
     critical_token_mask: at.Bool[ArrayT, "*b l"] | None = None
     number_token_mask: at.Bool[ArrayT, "*b l"] | None = None
     direction_token_mask: at.Bool[ArrayT, "*b l"] | None = None
@@ -74,10 +80,20 @@ class CoTObservation(_model.Observation[ArrayT], Generic[ArrayT]):
         # Construct subclass using base fields
         base_dict = dataclasses.asdict(base)
 
+        # Accept both new and legacy keys for backward-compat with any cached
+        # data dicts. New code paths emit only the new names.
+        ar_target = getk("tokenized_ar_target_mask")
+        if ar_target is None:
+            ar_target = getk("tokenized_langact_mask")  # legacy
+        stage = getk("tokenized_stage_mask")
+        if stage is None:
+            stage = getk("tokenized_reasoning_mask")  # legacy
+
         return cls(
             **base_dict,
-            tokenized_langact_mask=getk("tokenized_langact_mask"),
-            tokenized_reasoning_mask=getk("tokenized_reasoning_mask"),
+            tokenized_ar_target_mask=ar_target,
+            tokenized_stage_mask=stage,
+            tokenized_plan_mask=getk("tokenized_plan_mask"),
             critical_token_mask=getk("critical_token_mask"),
             number_token_mask=getk("number_token_mask"),
             direction_token_mask=getk("direction_token_mask"),

@@ -46,11 +46,15 @@ class TokenizePromptAndReasoning(DataTransformFn):
 
         # Always tokenize regular reasoning (prompt + language_actions)
         language_actions = data.pop("language_actions", None)  # if None, inference
-        # Optional cascade-VLA two-segment input: high-level reasoning ([think]) and
-        # low-level langact ([action]). When `langact` is provided, `language_actions`
-        # is treated as the [think] reasoning segment and `langact` as the [action]
-        # segment; the tokenizer will produce a separate `tokenized_reasoning_mask`.
+        # Optional cascade-VLA segmented input. When `langact` is provided we run
+        # in segmented mode: `language_actions` becomes the [stage] reasoning
+        # span, `langact` becomes the [action] span. When `plan` is also provided,
+        # `plan_position` selects whether the plan is shown to the model in the
+        # prompt ("prompt") or generated as part of the AR target ("target").
+        # See PaligemmaTokenizer.tokenize for the three calling contexts.
         langact = data.pop("langact", None)
+        plan = data.pop("plan", None)
+        plan_position = data.pop("plan_position", "none")  # "none" | "prompt" | "target"
         dataset_name = data.pop("dataset_name", None)  # if None, inference
         frame_description = data.pop("frame_description", "robot base frame")
         if dataset_name is not None:
@@ -71,22 +75,26 @@ class TokenizePromptAndReasoning(DataTransformFn):
 
         # frame_description = "robot base frame"
 
-        # Tokenize regular reasoning. In single-segment legacy mode this returns
-        # `reasoning_only_mask=None`; in two-segment cascade-VLA mode it splits the
-        # ar-mask (`reasoning_mask`, used as langact_mask + CE target) from the
-        # reasoning-only sub-mask (used by the action attention block).
+        # Tokenize. The 8-tuple is the new cascade-VLA shape:
+        #   tokens, attn_mask, ar_target_mask, number, direction, loss, stage, plan
+        # In legacy mode (langact=None, plan_position="none") stage_mask and
+        # plan_mask are None and ar_target_mask covers the reasoning span only —
+        # back-compatible with the old `tokenized_langact_mask` semantics.
         (
             tokens,
             pad_mask,
-            reasoning_mask,
+            ar_target_mask,
             numeric_mask,
             direction_mask,
             token_loss_mask,
-            reasoning_only_mask,
+            stage_mask,
+            plan_mask,
         ) = self.tokenizer.tokenize(
             prompt,
             language_actions,
             state,
+            plan=plan,
+            plan_position=plan_position,
             langact=langact,
             is_vqa_sample=is_vqa_sample,
             is_prediction_sample=is_prediction_sample,
@@ -95,7 +103,7 @@ class TokenizePromptAndReasoning(DataTransformFn):
             state_dropout=self.state_dropout,
         )
 
-        # Combine number_mask and direction_mask for critical tokens
+        # Combine number_mask and direction_mask for critical tokens.
         critical_mask = (
             np.logical_or(numeric_mask, direction_mask) if numeric_mask is not None else None
         )
@@ -104,14 +112,21 @@ class TokenizePromptAndReasoning(DataTransformFn):
             **data,
             "tokenized_prompt": tokens,  # kept for compatibility with upstream
             "tokenized_prompt_mask": pad_mask,  # kept for compatibility with upstream
-            "tokenized_langact_mask": reasoning_mask,
+            # NEW canonical name for the union-of-AR-targets mask. The legacy
+            # `tokenized_langact_mask` key is retained as an alias for back-compat
+            # with downstream code paths that have not yet been migrated.
+            "tokenized_ar_target_mask": ar_target_mask,
+            "tokenized_langact_mask": ar_target_mask,  # legacy alias
             "token_loss_mask": token_loss_mask,
             "tokenized_dataset_name": tokenized_dataset_name,
         }
-        if reasoning_only_mask is not None:
-            # Two-segment cascade-VLA mode: emit the reasoning-only sub-mask so the
-            # downstream model can apply unmask_langact / partial stop_grad logic.
-            result["tokenized_reasoning_mask"] = reasoning_only_mask
+        if stage_mask is not None:
+            # Cascade-VLA segmented mode: emit the stage sub-mask so the downstream
+            # model can apply unmask_langact / partial stop_grad logic.
+            result["tokenized_stage_mask"] = stage_mask
+            result["tokenized_reasoning_mask"] = stage_mask  # legacy alias
+        if plan_mask is not None:
+            result["tokenized_plan_mask"] = plan_mask
 
         if self.verbose_mode:
             result.update(

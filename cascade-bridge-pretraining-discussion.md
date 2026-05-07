@@ -712,14 +712,130 @@ huggingface-cli download jnogga/bridge_data_v2_scripted --repo-type dataset
 | pod 磁盘空间不足（50GB） | 检查 pod 磁盘前确认；如不足，仅用 teleop 部分 |
 | pod 内存爆（mapping 全表加载） | 当前 mapping JSON ~30MB，没问题 |
 
-### 13.6 训练前需用户决策的事项
+### 13.6 决策已敲定（2026-05-06）
 
-1. **plan_as_ar_target 默认值**：当前默认 True（推荐）。如果你想先和 §10.1 方案 A（plan 入 prompt）对比，需要在 config 里 toggle
-2. **是否包含 `bridge_data_v2_scripted`**：scripted 数据质量可能比 teleop 略低，可先只用 teleop（43k episodes）
-3. **batch_size**：当前 config 设 128。pod 单卡内存决定上限，建议先用 32 dry-run，再按显存放大
-4. **num_train_steps**：当前 100K。Bridge teleop 总 step 数 ~1.5M，按 batch 128 一个 epoch ~12K steps，100K steps ≈ 8 epoch。这是合理的
-5. **保存间隔**：当前 5K steps 保存一次，每个 ckpt ~10GB（PaliGemma 2B），100K steps 会保存 20 次共 200GB——磁盘够吗？建议加 `keep_period=5000` + `keep_last_n=3` 控制
-6. **wandb 项目名**：默认从 helm values 读，需要确认
+| # | 项 | 决策 |
+|---|----|------|
+| 1 | plan_as_ar_target | 重新设计为概率切换 `plan_position`，详见 §10 (`p_plan=0.15`) |
+| 2 | 是否包含 scripted | ✅ 包含。`bridge_lerobot_loader` 自动从 `DEFAULT_SCRIPTED_SNAP_PARENT` 解析 |
+| 3 | batch_size | **128**（A100 80GB 安全；OOM 时降到 64） |
+| 4 | num_train_steps | **80,001** （≈ 6.5 epoch over Bridge teleop 1.55M frames） |
+| 5 | save_interval / keep_period | **10K / 20K** —— PaliGemma 2B ckpt ~10GB，常驻 4 个里程碑 + 滚动保留近期；总占用约 80GB |
+| 6 | wandb 启动前的代理 | 必须先 `~/.local/bin/pod-tunnel proxy &` 确保 pod 能访问外网 |
+
+### 13.7 dataloader 接入完成
+
+代码已就绪，端到端 smoke test 通过：
+- [bridge_data_loader.py](src/lap/datasets/bridge_data_loader.py) — `BridgeDataLoader` + `_BridgeIterableTorchDataset`
+- [data_loader.py](src/lap/datasets/data_loader.py#L148) — `create_data_loader` 加 `repo_id=="bridge_ecot"` 分支
+- [test_bridge_dataloader.py](scripts/test_bridge_dataloader.py) — 端到端验证脚本
+
+实测结果：
+```
+Batch 0:  image['base_0_rgb'] shape=(2, 224, 224, 3) float32  mask=[True, True]
+          image['left_wrist_0_rgb'] shape=(2, 224, 224, 3) float32  mask=[False, False]
+          ar_target_mask sums = [29, 29]
+          stage_mask sums = [22, 22]   plan_mask sums = [0, 0]
+          actions shape=(2, 1, 7)  all_zero=True
+```
+
+### 13.8 K8s 部署 Runbook
+
+#### Step 1 — 同步代码到 pod
+
+本地：
+```bash
+cd /home/numbnut/worksapce/RoboTwin
+rsync -avz policy/lap/ \
+  --exclude ".venv" --exclude "**__pycache__" --exclude "uv.lock" \
+  --exclude "wandb" --exclude "checkpoints" --exclude ".git" \
+  k98s:/data/zhaoqc/RoboTwin/policy/lap/
+```
+
+如果 rsync 出错（k98s SSH 链路断），先：
+```bash
+./policy/pi05/launch_pod_ssh.sh --skip-helm
+```
+然后重试 rsync。
+
+#### Step 2 — 进入 pod，启动外网代理
+
+```bash
+kubectl exec -it deployment/zhaoqc-gpu-keepalive-zhaoqc-pi05-finetune-steps-25000 -- bash
+
+# Inside pod:
+~/.local/bin/pod-tunnel proxy &
+# Verify proxy is up
+curl -sI https://huggingface.co | head -3
+```
+
+#### Step 3 — 验证数据集已就位
+
+```bash
+# In pod:
+ls /data/.cache/huggingface/hub/datasets--Embodied-CoT--embodied_features_bridge/snapshots/*/embodied_features_bridge.json
+ls /data/.cache/huggingface/hub/datasets--jnogga--bridge_data_v2_teleop/snapshots/*/data/chunk-000/file_000.parquet
+ls /data/.cache/huggingface/hub/datasets--jnogga--bridge_data_v2_scripted/snapshots/*/data/chunk-000/file_000.parquet
+ls /data/.cache/huggingface/hub/models--google--paligemma-3b-pt-224/
+```
+
+如果某个数据集还没下载，在 pod 上拉：
+```bash
+huggingface-cli download Embodied-CoT/embodied_features_bridge --repo-type dataset
+huggingface-cli download jnogga/bridge_data_v2_teleop --repo-type dataset
+huggingface-cli download jnogga/bridge_data_v2_scripted --repo-type dataset
+```
+
+#### Step 4 — 安装新依赖
+
+```bash
+cd /data/zhaoqc/RoboTwin/policy/lap
+uv pip install --python .venv/bin/python ijson decord
+```
+
+#### Step 5 — 端到端 smoke test（强烈推荐先跑！）
+
+```bash
+.venv/bin/python scripts/test_bridge_dataloader.py --batch-size 4 --num-batches 2
+# Expected: prints batch shapes, no exceptions, "Smoke test passed."
+```
+
+第一次会构建 `~/.cache/cascade_vla/bridge_ecot_lerobot_mapping.json`（耗时
+1-3 分钟，~30MB）。后续运行直接读缓存。
+
+注意：mapping cache 默认放 `~/.cache/cascade_vla/`，但 pod 上 `~` 通常映射到
+`/root` 或 `/data/zhaoqc`。如果重启 pod 缓存丢，rebuild 会再触发；不影响正确性。
+
+#### Step 6 — 启动训练
+
+```bash
+# Optionally launch pod-tunnel for wandb if not already running
+~/.local/bin/pod-tunnel proxy &
+
+# Train
+.venv/bin/python scripts/train.py --config-name lap_bridge_pretrain
+```
+
+#### Step 7 — 监控
+
+- **wandb**：观察 `langact_loss` 曲线、`langact_token_acc`
+- **GPU 利用率**：`nvidia-smi` 应该 >80%；低于 50% 说明 dataloader 是瓶颈
+- **Disk usage**：`du -sh /data/zhaoqc/RoboTwin/checkpoints/lap_bridge_pretrain/` 监控
+- **Loss 曲线 sanity**：
+  - Step 0：~10 (random init logits, log(257152) / 12 = 10.4)
+  - Step 2000 (warmup 结束)：应快速降到 ~3-4
+  - Step 80000：应稳定在 ~1-2
+
+#### Step 8 — 故障排查
+
+| 现象 | 可能原因 | 解决 |
+|------|--------|------|
+| dataloader OOM / 卡住 | LeRobot mp4 解码/缓存太多 | 降 `num_workers`，在 `BridgeDataLoader` 改 |
+| step 0 batch 拉取慢 | 第一次构建 mapping JSON | 跑过一次后会缓存，正常 |
+| GPU 利用率低 | dataloader 瓶颈 | 提高 `num_workers`（config.num_workers），考虑预 cache 帧 |
+| weight_loader 报错下不到 GCS | `pod-tunnel proxy` 没启动 / 代理失效 | 重启 proxy；或本地转 paligemma-3b-pt-224 → npz 并 sync 到 pod，切 weight_loader.kind="paligemma2" |
+| OOM at first forward | batch_size 太大 | 降到 64，再降 32 |
+| `module 'torch.distributed' has no attribute ...` | 多卡相关接口；本次单卡训练用不到 | 忽略 |
 
 ---
 

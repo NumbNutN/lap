@@ -903,16 +903,27 @@ _CONFIGS = [
     # ------------------------------------------------------------------
     # Cascade-VLA Bridge pretraining (expert-0 only, no action diffusion).
     # ------------------------------------------------------------------
-    # NOTE: Requires Bridge V2 images to be available. With the default
-    # `NullImageLoader` the pipeline runs but produces no useful gradients
-    # because images are constant black frames. See
-    # cascade-bridge-pretraining-discussion.md §4 for image-data setup.
+    # Decision rationale (see policy/lap/cascade-bridge-pretraining-discussion.md §13.6):
+    #   batch_size=128:    fits in 1× A100 80GB at 256 tokens × 2B params (rough
+    #                      napkin 30GB activations + 30GB params + opt state).
+    #                      Drop to 64 if OOMs hit on smaller GPUs.
+    #   num_train_steps=80K: Bridge teleop has ~1.55M frames / 128 batch ≈ 12K
+    #                      steps per epoch. 80K ≈ 6.5 epochs — empirically a
+    #                      safe sweet spot for VLM pretraining on 1M-scale data.
+    #   save_interval=10K: every ~12% of training. PaliGemma 2B ckpt ≈ 10GB,
+    #                      so 8 ckpts × 10GB = 80GB. Keep_period=20K keeps
+    #                      4 milestone ckpts (10K, 30K, 50K, 70K) permanently;
+    #                      others rotate.
+    #   Weight loader:     kind="paligemma" pulls from GCS via pod-tunnel proxy.
+    #                      If pod cannot reach GCS, convert the local HF
+    #                      paligemma-3b-pt-224 to npz format and switch to
+    #                      kind="paligemma2" with a local params_path.
     TrainConfig(
         name="lap_bridge_pretrain",
         model=lap_config.LAPConfig(
             action_dim=7,                   # placeholder — unused with action training disabled
             action_horizon=1,               # placeholder
-            max_token_len=256,              # task + plan + reasoning + langact ~150-200 tokens; leaves headroom
+            max_token_len=320,              # task(~15) + plan(~30) + stage(~25) + action(~10) + markers; leaves headroom for plan-as-target mode (~100 tokens)
             pi05=True,
             discrete_state_input=False,     # Bridge ECoT has no proprio state
             # === Single-expert language pretraining ===
@@ -923,15 +934,17 @@ _CONFIGS = [
             # === Cascade-VLA toggles (no-op when action training disabled, kept for clarity) ===
             action_attention_mode="lap_original",
             stop_grad_mode="off",
+            cascade_unmask_plan=False,
             # === Backbone ===
             paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m",   # unused
+            action_expert_variant="gemma_300m",   # unused (single-expert path)
             prompt_format="lap",
             language_loss_weight=1.0,
             enable_image_augmentation=True,
         ),
         data=BridgeECoTDataConfig(
             include_plan=True,
+            p_plan=0.15,
             skip_steps_without_change=False,
             shuffle_buffer_size=10_000,
             val_fraction=0.0,
@@ -939,16 +952,15 @@ _CONFIGS = [
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=2000,
             peak_lr=5e-5,
-            decay_steps=100_000,
+            decay_steps=80_000,
             decay_lr=5e-6,
         ),
         weight_loader=weight_loaders.WeightLoaderChoice(
             kind="paligemma",
-            params_path="checkpoints/paligemma-2b-mix-224",
         ),
-        save_interval=5000,
-        keep_period=5000,
-        num_train_steps=100_001,
+        save_interval=10_000,
+        keep_period=20_000,
+        num_train_steps=80_001,
         batch_size=128,
         ema_schedule_choice=EmaScheduleChoice(kind="cosine_delayed", start_step=2000),
     ),

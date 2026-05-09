@@ -191,6 +191,12 @@ class BridgeECoTSampleBuilder:
         try:
             image = self.image_loader.get(file_path, episode_id, step_idx)
         except FileNotFoundError:
+            # No matching LeRobot episode; drop this sample.
+            return None
+        except IndexError:
+            # ECoT reasoning has more step keys than the matched LeRobot episode
+            # has frames (alignment mismatch — see §9.2 caveat in
+            # cascade-bridge-pretraining-discussion.md). Drop instead of crash.
             return None
         # Sanity: enforce HWC uint8.
         if image.dtype != np.uint8 or image.ndim != 3 or image.shape[-1] != 3:

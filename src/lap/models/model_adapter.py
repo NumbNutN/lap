@@ -186,6 +186,17 @@ def preprocess_observation(
         else:
             out_masks[key] = jnp.asarray(observation.image_masks[key])
 
+    # Field rename map (legacy → cascade-VLA name):
+    #   tokenized_langact_mask → tokenized_ar_target_mask
+    #   tokenized_reasoning_mask → tokenized_stage_mask
+    # Use `getattr(..., legacy_name, None)` so old-style data dicts still work.
+    ar_target_mask = getattr(observation, "tokenized_ar_target_mask", None)
+    if ar_target_mask is None:
+        ar_target_mask = getattr(observation, "tokenized_langact_mask", None)
+    stage_mask = getattr(observation, "tokenized_stage_mask", None)
+    if stage_mask is None:
+        stage_mask = getattr(observation, "tokenized_reasoning_mask", None)
+
     return CoTObservation(
         images=out_images,
         image_masks=out_masks,
@@ -194,7 +205,9 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
-        tokenized_langact_mask=getattr(observation, "tokenized_langact_mask", None),
+        tokenized_ar_target_mask=ar_target_mask,
+        tokenized_stage_mask=stage_mask,
+        tokenized_plan_mask=getattr(observation, "tokenized_plan_mask", None),
         critical_token_mask=getattr(observation, "critical_token_mask", None),
         number_token_mask=getattr(observation, "number_token_mask", None),
         direction_token_mask=getattr(observation, "direction_token_mask", None),

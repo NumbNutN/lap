@@ -720,7 +720,8 @@ huggingface-cli download jnogga/bridge_data_v2_scripted --repo-type dataset
 | 2 | 是否包含 scripted | ✅ 包含。`bridge_lerobot_loader` 自动从 `DEFAULT_SCRIPTED_SNAP_PARENT` 解析 |
 | 3 | batch_size | **128**（A100 80GB 安全；OOM 时降到 64） |
 | 4 | num_train_steps | **80,001** （≈ 6.5 epoch over Bridge teleop 1.55M frames） |
-| 5 | save_interval / keep_period | **10K / 20K** —— PaliGemma 2B ckpt ~10GB，常驻 4 个里程碑 + 滚动保留近期；总占用约 80GB |
+| 5 | ~~save_interval / keep_period~~ | ~~**10K / 20K**~~ —— **已废弃**，见下方 5'。 |
+| 5' | save_interval / keep_period （revised 2026-05-07）| **2K / 10K** —— 首次训练前期勤保，单次崩溃最多损失 2K 步（≈25 min）。`keep_period=10K` 即每 10K 一个永久里程碑，共 8 个 milestone（10K/20K/.../80K）。**revision 起因**：5-7 凌晨 step 10000 第一次触发 save 时进程被 SIGKILL，写入未完成，得到 0 个可用 ckpt。后续 first-time 训练默认采用此密集策略。 |
 | 6 | wandb 启动前的代理 | 必须先 `~/.local/bin/pod-tunnel proxy &` 确保 pod 能访问外网 |
 
 ### 13.7 dataloader 接入完成
@@ -836,6 +837,183 @@ uv pip install --python .venv/bin/python ijson decord
 | weight_loader 报错下不到 GCS | `pod-tunnel proxy` 没启动 / 代理失效 | 重启 proxy；或本地转 paligemma-3b-pt-224 → npz 并 sync 到 pod，切 weight_loader.kind="paligemma2" |
 | OOM at first forward | batch_size 太大 | 降到 64，再降 32 |
 | `module 'torch.distributed' has no attribute ...` | 多卡相关接口；本次单卡训练用不到 | 忽略 |
+
+---
+
+### 13.9 远程诊断 Runbook（事后排查 / 训练状态自检）
+
+> **背景**：训练任务跑在 k8s deployment 中，主机回连不便；用 `kubectl exec` 直接发命令到 pod 内部检查训练状态、磁盘、checkpoint、GPU。Local 端从 `kubectl` 即可完成 Pod 内观察，无需 SSH。
+
+#### Local → Pod 命令模板
+
+```bash
+# 单条命令（无 -t/-i，用于脚本化）
+kubectl exec deployment/zhaoqc-gpu-keepalive-zhaoqc-pi05-finetune-steps-25000 \
+  -- bash -lc '<COMMAND>'
+
+# 多条命令包成一个 bash -lc 子 shell（推荐，因为 kubectl 调用本身有开销）
+kubectl exec deployment/zhaoqc-gpu-keepalive-zhaoqc-pi05-finetune-steps-25000 -- bash -lc '
+  echo "=== A ==="; <cmd_a>
+  echo "=== B ==="; <cmd_b>
+'
+
+# 进交互 shell（手工调试用）
+kubectl exec -it deployment/zhaoqc-gpu-keepalive-zhaoqc-pi05-finetune-steps-25000 -- bash
+```
+
+注意 `bash -lc` 比 `bash -c` 多读 `~/.bash_profile` / `~/.bashrc`，能拿到 conda/uv/proxy 环境。
+
+#### Local → Pod 单文件同步（小改动用 `kubectl cp`，比 rsync 轻）
+
+```bash
+# 拿 Pod 名（deployment 默认绑定一个 replica）
+POD=$(kubectl get pods --no-headers | grep zhaoqc-pi05-finetune-steps-25000 | awk '{print $1}' | head -1)
+
+# Push 单个文件
+kubectl cp <local-path> "$POD":<pod-path>
+
+# Push 一棵子目录（注意：kubectl cp 是 tar over kubectl exec，子目录要 trail-slash 控制）
+kubectl cp <local-dir>/. "$POD":<pod-dir>/
+
+# 验证（前后 md5 对比）
+md5sum <local-path>
+kubectl exec deployment/<deploy-name> -- md5sum <pod-path>
+```
+
+适用场景：单文件 patch（如 config.py 调参）、补丁脚本。整个 `policy/lap/` 同步用 §13.8 Step 1 的 rsync。
+
+#### 关键诊断检查表
+
+| 类别 | 命令 | 期望 / 含义 |
+|------|------|------|
+| **挂载点** | `df -hT /data /tmp` | `/data` 应为 `gpfs2`（持久化）；`/tmp` 落 overlay/tmpfs（pod 重启即丢） |
+| **训练进程** | `ps -eo pid,etime,pcpu,cmd \| grep -E "train.py\|jax"` | 训练运行中应见 `python ... train.py`；只见 keepalive 说明已退出 |
+| **GPU 利用率** | `nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv` | 训练中 >70%；空载 <5% 表示进程已死或 idle |
+| **Checkpoint 总量** | `du -sh /data/zhaoqc/RoboTwin/policy/lap/checkpoints/*/` | 与预算（~80GB）对比 |
+| **Checkpoint 完整性** | `ls /data/zhaoqc/.../<exp_name>/` | 完整 ckpt 是 `<step>/`；带 `.orbax-checkpoint-tmp-N` 后缀 = 写入未完成 |
+| **训练日志尾部** | `tail -80 /data/.../wandb/latest-run/files/output.log` | 看最后 step、loss、是否 traceback |
+| **进程退出方式** | `ls /data/.../wandb/latest-run/files/wandb-summary.json` | 文件存在 = graceful exit；不存在 = 被强制 kill |
+| **Pod uptime** | `ps -p 1 -o etime,start,cmd` + `date` | 算出 entrypoint 起跑时间，对照训练 log 判断是否被重启 |
+| **wandb run id** | `cat <ckpt_dir>/wandb_id.txt` | 用于 resume；保存在 ckpt 目录下，跟 ckpt 一同持久化 |
+| **同步问题** | `dmesg \| tail` (常被 deny) / `free -h` | OOM 排查通常需要 root；free 看内存压力 |
+
+#### 故障模式速查
+
+| 症状 | 可能原因 | 应对 |
+|------|----------|------|
+| 训练 step 卡在某步不动 | dataloader 阻塞、GCS 拉权重超时 | `tail output.log`、检查 `pod-tunnel proxy` |
+| `<step>/` 目录变成 `<step>.orbax-checkpoint-tmp-0/` | 写入中被 SIGKILL | params 大概率 OK；train_state 风险高（resume 不可信） |
+| pod 重启后 keepalive 在跑而 train 不在 | k8s `restartPolicy=Always` + 训练进程崩溃 | 看 wandb 末尾日志找异常；检查 helm values 里 entrypoint 是否还是 train.py |
+| wandb cloud 有 metrics 但本地 `wandb-summary.json` 缺失 | 进程被强制终止（OOM、抢占、kubectl delete） | wandb cloud 是 source of truth；本地能 resume 就靠 ckpt 内的 wandb_id.txt |
+
+#### 实战例（2026-05-07 训练异常排查）
+
+```bash
+# 1. 看进程
+kubectl exec deployment/.../-pi05-finetune-steps-25000 -- bash -lc 'ps -eo pid,etime,cmd | grep -E "train|python" | grep -v grep'
+# → 只看到 keepalive python，无 train.py。结论：训练已退出。
+
+# 2. 看 GPU
+kubectl exec ... -- nvidia-smi
+# → utilization=0%, memory=720MiB（仅 keepalive 占用）。佐证训练不在跑。
+
+# 3. 看 ckpt
+kubectl exec ... -- ls -lah /data/zhaoqc/RoboTwin/policy/lap/checkpoints/lap_bridge_pretrain/lap_bridge_pretrain_run0/
+# → 仅 `10000.orbax-checkpoint-tmp-0/` + `wandb_id.txt`。结论：step 10000 写入未完成。
+
+# 4. 看 log 末尾
+kubectl exec ... -- bash -lc 'tail -80 /data/zhaoqc/RoboTwin/policy/lap/wandb/latest-run/files/output.log'
+# → 最后输出停在 "Save Finalize thread starting"，无 traceback；
+# → 配合 wandb-summary.json 缺失，结论：被 SIGKILL（k8s 抢占或 OOM）。
+
+# 5. 算时间线
+kubectl exec ... -- bash -lc 'date; ps -p 1 -o etime,start,cmd'
+# → keepalive started 01:27:53 = 训练 log 末尾 + 21s。结论：容器重启发生在 ckpt 写入中。
+```
+
+---
+
+### 13.10 推理 smoke test ([scripts/test_cascade_inference.py](scripts/test_cascade_inference.py))
+
+为了在训练过程中或训练完成后验证模型，提供 `scripts/test_cascade_inference.py`。
+
+#### 功能
+
+- 加载某一步的 ckpt（默认指向 `checkpoints/lap_bridge_pretrain/<exp_name>/<step>/`）
+- 从 Bridge ECoT 数据集取出第 N 个 sample（含 ground truth: task / plan / stage / action）
+- 用 `model.sample_tokens` 自回归生成 token
+- 解析输出中的 `[plan]` / `[stage]` / `[action]` 段并与 ground truth 对照打印
+
+#### 两种推理模式
+
+| Mode | 说明 | 触发 |
+|------|------|------|
+| Context 3（**默认**）| Prompt 仅含 task；模型 AR 生成完整 cascade `[plan] ... [stage] ... [action]` | 不传 `--given-plan` |
+| Context 2 | Prompt 含 task + ground-truth plan；模型只生成 `[stage] ... [action]` | 加 `--given-plan` |
+
+#### 与训练共享 GPU 的两条路径
+
+训练占满 6 张 H200 时无法在同一进程拿到 GPU。两种解法：
+
+**A. CPU 推理（不打断训练）— 推荐做 quick check 用**
+```bash
+cd /data/zhaoqc/RoboTwin/policy/lap
+JAX_PLATFORMS=cpu .venv/bin/python scripts/test_cascade_inference.py \
+  --checkpoint-dir checkpoints/lap_bridge_pretrain/lap_bridge_pretrain_run1/10000 \
+  --sample-idx 0
+```
+- 200GiB 内存够装 PaliGemma 2B (bfloat16 ~5GB)
+- 单次生成 200 token 约 **5-10 分钟**（CPU 慢但可接受）
+- 训练不受影响
+
+**B. 暂停训练→GPU 推理→resume**
+```bash
+# 1. 找到训练 PID 并优雅 kill（让 wandb 结尾 + 写 wandb-summary.json）
+ps -eo pid,cmd | grep "train.py lap_bridge_pretrain" | grep -v grep
+kill -SIGTERM <PID>
+# 2. 等所有 GPU 释放
+until ! nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | grep -q "^[1-9]"; do sleep 2; done
+# 3. 跑 GPU 推理（~1 分钟）
+.venv/bin/python scripts/test_cascade_inference.py \
+  --checkpoint-dir checkpoints/lap_bridge_pretrain/lap_bridge_pretrain_run1/10000 \
+  --sample-idx 0
+# 4. resume 训练（config.resume=True 会自动找到最近 ckpt）
+nohup setsid .venv/bin/python scripts/train.py lap_bridge_pretrain \
+  --exp-name lap_bridge_pretrain_run1 \
+  >> /data/zhaoqc/RoboTwin/policy/lap/logs/run1.log 2>&1 < /dev/null &
+```
+- 推理快但有训练中断窗口（kill + ckpt restore + JAX recompile ≈ 5-10 min 训练损失）
+- 适用于做正式评估时
+
+#### 期望输出（一旦训练收敛）
+
+```
+[5/5] Sampling tokens (...)
+      generated 87 tokens (EOS reached)
+==============================================================================
+DECODED RAW
+==============================================================================
+ [plan] reach grasp lift transport place [stage] move arm to spoon [action] move forward and right
+==============================================================================
+PARSED SEGMENTS  (model output  vs  ground truth)
+==============================================================================
+--- [plan] ---
+  pred: 'reach grasp lift transport place'
+  gt:   'reach grasp lift transport place'
+--- [stage] ---
+  pred: 'move arm to spoon'
+  gt:   'reach the spoon by moving the arm forward and to the right'
+--- [action] ---
+  pred: 'move forward and right'
+  gt:   'move forward and to the right'
+==============================================================================
+```
+
+早期 ckpt（step 2K-10K）输出会噪声更多甚至发散；这是正常现象，主要看：
+- ✅ 模型能产出三段式（marker 出现位置正确）
+- ✅ Token 不重复发散（"the the the the"）
+- ✅ Plan 与 Bridge 任务粗略对应
+- ✅ Action 包含合理的 motion primitive 词汇（"move", "left", "up", "grasp"）
 
 ---
 

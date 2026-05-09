@@ -558,7 +558,9 @@ class TokenizeFASTInputs(DataTransformFn):
             **data,
             "tokenized_prompt": tokens,
             "tokenized_prompt_mask": token_mask,
-            "tokenized_langact_mask": ar_mask,
+            # New canonical name + legacy alias.
+            "tokenized_ar_target_mask": ar_mask,
+            "tokenized_langact_mask": ar_mask,  # legacy alias
             "token_loss_mask": loss_mask,
             "tokenized_dataset_name": tokenized_dataset_name,
         }

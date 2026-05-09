@@ -196,7 +196,15 @@ class BridgeDataLoader:
 
         local_batch_size = max(1, batch_size // jax.process_count())
         if sharding is None:
-            sharding = jax.sharding.PositionalSharding(jax.local_devices())
+            # Default to NamedSharding over the batch axis. This works correctly
+            # for any rank (rank-1 scalars, rank-3 images, rank-4 batches, etc.),
+            # whereas PositionalSharding(shape=(N_devices,)) only fits rank-1
+            # tensors and trips on multi-GPU pods. Matches upstream
+            # `openpi.training.data_loader.TorchDataLoader` default.
+            sharding = jax.sharding.NamedSharding(
+                jax.sharding.Mesh(jax.devices(), ("B",)),
+                jax.sharding.PartitionSpec("B"),
+            )
         self._sharding = sharding
         self._num_batches = num_batches
         self._data_cfg = data_cfg
@@ -229,8 +237,21 @@ class BridgeDataLoader:
             ):
                 return x
             if isinstance(self._sharding, jax.sharding.NamedSharding):
+                # Skip sharding when batch axis is not divisible by num devices
+                # (e.g., smoke tests with batch_size=4 on 2 GPUs is fine, but
+                # batch_size=3 on 2 GPUs is not). Falls back to per-device replicate.
+                mesh = self._sharding.mesh
+                n_dev = int(np.prod(list(mesh.shape.values())))
+                if x.shape[0] % n_dev != 0:
+                    return jax.device_put(x)
                 return jax.make_array_from_process_local_data(self._sharding, x)
-            return jax.device_put(x, self._sharding)
+            # PositionalSharding path: reshape to match leaf rank so multi-dim
+            # tensors (images) are sharded along axis 0 only.
+            n_dev = self._sharding.shape[0]
+            if x.shape[0] % n_dev != 0:
+                return jax.device_put(x)
+            shaped_sharding = self._sharding.reshape((n_dev,) + (1,) * (x.ndim - 1))
+            return jax.device_put(x, shaped_sharding)
 
         return jax.tree_util.tree_map(put, batch)
 
@@ -369,12 +390,18 @@ def create_bridge_data_loader(
         max_samples=max_samples,
     )
 
+    # NOTE: Bridge ECoT uses a streaming IterableDataset that is non-trivial to
+    # pickle (file handles, ijson stream state, decord readers). Spawn workers
+    # would also each rebuild the ECoT↔LeRobot mapping on import. Force
+    # num_workers=0 to keep things in-process — matches the upstream RLDS
+    # default (see openpi/.../config.py:850 comment "RLDS DataLoader requires
+    # num_workers=0").
     return BridgeDataLoader(
         torch_ds_wrapper.torch_dataset(),
         batch_size=train_config.batch_size,
         sharding=sharding,
         num_batches=num_batches,
-        num_workers=train_config.num_workers,
+        num_workers=0,
         seed=seed,
         data_cfg=data_cfg,
     )

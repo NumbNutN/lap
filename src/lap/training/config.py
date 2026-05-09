@@ -904,20 +904,34 @@ _CONFIGS = [
     # Cascade-VLA Bridge pretraining (expert-0 only, no action diffusion).
     # ------------------------------------------------------------------
     # Decision rationale (see policy/lap/cascade-bridge-pretraining-discussion.md §13.6):
-    #   batch_size=128:    fits in 1× A100 80GB at 256 tokens × 2B params (rough
-    #                      napkin 30GB activations + 30GB params + opt state).
-    #                      Drop to 64 if OOMs hit on smaller GPUs.
+    #   batch_size=120:    must be divisible by data-mesh size (= 6 GPUs on this
+    #                      pod). 128 is the napkin target but pjit rejects
+    #                      "not divisible by 6". 120 = 6 × 20 is the closest
+    #                      smaller multiple. Drop to 96 (= 6 × 16) if OOMs hit.
     #   num_train_steps=80K: Bridge teleop has ~1.55M frames / 128 batch ≈ 12K
     #                      steps per epoch. 80K ≈ 6.5 epochs — empirically a
     #                      safe sweet spot for VLM pretraining on 1M-scale data.
-    #   save_interval=10K: every ~12% of training. PaliGemma 2B ckpt ≈ 10GB,
-    #                      so 8 ckpts × 10GB = 80GB. Keep_period=20K keeps
-    #                      4 milestone ckpts (10K, 30K, 50K, 70K) permanently;
-    #                      others rotate.
-    #   Weight loader:     kind="paligemma" pulls from GCS via pod-tunnel proxy.
-    #                      If pod cannot reach GCS, convert the local HF
-    #                      paligemma-3b-pt-224 to npz format and switch to
-    #                      kind="paligemma2" with a local params_path.
+    #   save_interval=2000 (= 2.5% of training, ≈25 min wall-clock):
+    #                      kept dense for first-time training so any crash loses
+    #                      ≤2K steps. PaliGemma 2B ckpt ≈ 10GB; with rotation
+    #                      bound by orbax max_to_keep (≈8) the active disk
+    #                      footprint stays around 80-100GB on /data (gpfs2 has
+    #                      13TB free, no concern). Originally 10K — see §13.6
+    #                      revision after the 2026-05-07 step-10000 incident
+    #                      where the first-and-only scheduled save was killed
+    #                      mid-write, leaving zero recoverable checkpoints.
+    #   keep_period=10K:   one permanent milestone every 10K steps (8 in total,
+    #                      matching the 80K horizon). First-time training prefers
+    #                      higher milestone density over the broader 20K spacing.
+    #   Weight loader:     kind="checkpoint" + pi05_base/params.
+    #                      The original kind="paligemma" downloads from
+    #                      gs://vertex-model-garden-paligemma-us/, but that
+    #                      bucket requires GCP auth (anonymous access denied).
+    #                      gs://openpi-assets/ allows anonymous gsutil reads,
+    #                      so we use pi05_base which contains compatible
+    #                      paligemma weights. With enable_action_training=False
+    #                      the action-expert weights from pi05_base are simply
+    #                      dropped (no action expert to load into).
     TrainConfig(
         name="lap_bridge_pretrain",
         model=lap_config.LAPConfig(
@@ -956,13 +970,17 @@ _CONFIGS = [
             decay_lr=5e-6,
         ),
         weight_loader=weight_loaders.WeightLoaderChoice(
-            kind="paligemma",
+            kind="checkpoint",
+            params_path="gs://openpi-assets/checkpoints/pi05_base/params",
         ),
-        save_interval=10_000,
-        keep_period=20_000,
+        save_interval=2_000,
+        keep_period=10_000,
         num_train_steps=80_001,
-        batch_size=128,
-        ema_schedule_choice=EmaScheduleChoice(kind="cosine_delayed", start_step=2000),
+        batch_size=96,                                  # = 6 × 16 (mesh size)
+        # EMA disabled: keeps a second copy of params (~12GB) and tipped pod
+        # memory over the 128GB cgroup limit during step 1 (OOMKilled).
+        # Re-enable later if pod memory is increased.
+        ema_schedule_choice=EmaScheduleChoice(kind="disabled"),
     ),
     *upstream_config._CONFIGS,  # noqa: SLF001
 ]

@@ -40,7 +40,13 @@ def _decode_reasoning_strings(obs: CoTObservation, tokenizer) -> tuple[list[str]
     """Extract and decode reasoning (language action) tokens per example."""
     tokens = array_utils.to_local_array(obs.tokenized_prompt)
     rmask = array_utils.to_local_array(obs.tokenized_prompt_mask)
-    langact_mask = array_utils.to_local_array(obs.tokenized_langact_mask)
+    # Renamed: tokenized_langact_mask → tokenized_ar_target_mask (covers all AR
+    # target positions: plan ∪ stage ∪ action). Fall back to legacy name for
+    # observations produced by old data pipelines.
+    ar_target_attr = getattr(obs, "tokenized_ar_target_mask", None)
+    if ar_target_attr is None:
+        ar_target_attr = getattr(obs, "tokenized_langact_mask", None)
+    langact_mask = array_utils.to_local_array(ar_target_attr)
     texts: list[str] = []
     lang_acts: list[str] = []
     for i in range(tokens.shape[0]):

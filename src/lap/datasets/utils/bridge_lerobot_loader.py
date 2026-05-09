@@ -328,18 +328,25 @@ class LeRobotBridgeImageLoader(BridgeV2ImageLoader):
     mapping: dict[str, Any] | None = None
     image_size: tuple[int, int] = (224, 224)
 
+    # Maximum number of decord VideoReader instances to keep alive at once.
+    # Each reader holds an mp4 demuxer + frame index in RAM; with ~50 episodes
+    # per mp4, 16 readers cover ~800 episodes. Empirically at cap=64 memory
+    # grew at ~80MB/step over 250 steps — would OOM around step 1000 on a
+    # 128GB pod. cap=16 keeps reader memory well under 1GB.
+    max_readers: int = 16
+
     def __post_init__(self):
         if self.mapping is None:
             raise ValueError(
                 "LeRobotBridgeImageLoader requires a precomputed mapping. "
                 "Build with `build_ecot_to_lerobot_mapping(...)` and pass result here."
             )
-        self._cache: dict[int, Any] = {}  # episode_index -> decord VideoReader
-        # Frame-offset table (episode_index -> first global frame index).
-        # We need this to find which mp4 chunk contains the episode and
-        # what frame offset to read.
-        # For LeRobot v3 the layout is: video_path = "videos/{video_key}/chunk-{chunk_index:03d}/file_{file_index:03d}.mp4"
-        # We don't yet know how chunks are sized — read info.json once.
+        # OrderedDict acts as an LRU: most-recently used moves to end on access,
+        # eviction pops from the front when over capacity.
+        from collections import OrderedDict
+        # Key by (kind, chunk_idx, file_idx) so episodes sharing the same mp4
+        # file reuse the same reader.
+        self._reader_cache: OrderedDict = OrderedDict()
         self._info_cache: dict[str, Any] = {}
 
     def _resolve_snap(self, kind: str) -> pathlib.Path:
@@ -354,13 +361,12 @@ class LeRobotBridgeImageLoader(BridgeV2ImageLoader):
     def _get_episode_video(self, kind: str, episode_index: int):
         """Return (decord.VideoReader, local_frame_offset) for the requested episode.
 
-        LeRobot v3 packs MULTIPLE episodes into one mp4 file. We find the right
-        file via the ``meta/episodes`` parquet `data/file_index` field.
+        LeRobot v3 packs MULTIPLE episodes into one mp4 file. We cache by the
+        (kind, chunk_idx, file_idx) triple so episodes sharing the same mp4 share
+        the reader. The cache is bounded LRU (size ``self.max_readers``) to keep
+        memory under control — without bounds, training on 43k+ episodes will
+        accumulate readers and OOM the pod.
         """
-        cache_key = (kind, episode_index)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
         snap = self._resolve_snap(kind)
         # Lazy-load episode meta to know which video file + frame offset.
         meta_key = (kind, "episodes_meta")
@@ -390,6 +396,13 @@ class LeRobotBridgeImageLoader(BridgeV2ImageLoader):
         fps = int(self._info_cache["fps"])
         from_idx = int(round(from_ts * fps))
 
+        # LRU lookup keyed by mp4 file (not episode_index) so episodes sharing
+        # the same mp4 chunk reuse the same VideoReader.
+        cache_key = (kind, chunk_idx, file_idx)
+        if cache_key in self._reader_cache:
+            self._reader_cache.move_to_end(cache_key)
+            return self._reader_cache[cache_key], from_idx
+
         video_path = (
             snap / "videos" / self.camera_key / f"chunk-{chunk_idx:03d}" / f"file_{file_idx:03d}.mp4"
         )
@@ -402,9 +415,12 @@ class LeRobotBridgeImageLoader(BridgeV2ImageLoader):
             raise RuntimeError("decord required: uv pip install decord") from exc
 
         vr = decord.VideoReader(str(video_path))
-        # Cache (vr, from_idx). Local frame for this episode = from_idx + step_idx.
-        self._cache[cache_key] = (vr, from_idx)
-        return self._cache[cache_key]
+        self._reader_cache[cache_key] = vr
+        # Evict the LRU entry if we exceeded the cap.
+        while len(self._reader_cache) > self.max_readers:
+            evict_key, evict_vr = self._reader_cache.popitem(last=False)
+            del evict_vr  # let decord release the file handle
+        return vr, from_idx
 
     def get(self, file_path: str, episode_id: str, step_idx: int) -> np.ndarray:
         key = f"{file_path}::{episode_id}"

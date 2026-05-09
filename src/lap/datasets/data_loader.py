@@ -162,6 +162,22 @@ def create_data_loader(
             max_samples=max_samples,
         )
 
+    # RoboTwin Stage 2 (action-expert) finetuning path: detected by repo_id="robotwin".
+    # Routes through the multi-task mixed dataset → torch DataLoader → sharded
+    # CoTObservation pipeline. See lap.datasets.robotwin_data_loader.
+    if getattr(data_cfg, "repo_id", None) == "robotwin":
+        if framework == "pytorch":
+            raise NotImplementedError("PyTorch framework + RoboTwin not supported.")
+        from lap.datasets.robotwin_data_loader import create_robotwin_data_loader
+
+        return create_robotwin_data_loader(
+            config,
+            sharding=sharding,
+            num_batches=num_batches,
+            seed=seed,
+            max_samples=max_samples,
+        )
+
     # If RLDS, follow the RLDS path with our two hooks; else, fall back to upstream torch loader
     if data_cfg.rlds_data_dir is not None and data_cfg.rlds_data_dir != "":
         if framework == "pytorch":

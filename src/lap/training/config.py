@@ -307,6 +307,71 @@ class BaseDataConfigFactory(DataConfig, upstream_config.DataConfigFactory, abc.A
 
 
 @dataclasses.dataclass(frozen=True)
+class RoboTwinDataConfig(BaseDataConfigFactory):
+    """Config for cascade-VLA Stage 2 (action-expert) finetuning on RoboTwin task data.
+
+    Loads HDF5 + per-episode metadata JSON from a multi-task RoboTwin collection
+    (see ``lap.datasets.robotwin_dataset.RoboTwinMixedDataset``). Each task is
+    weighted independently; weights are renormalized over present tasks.
+
+    The expected on-disk layout per task is:
+        <data_root>/<task_name>/demo_clean/data/episode<N>.hdf5
+        <data_root>/<task_name>/demo_clean/metadata/episode<N>.json
+    """
+
+    repo_id: str = "robotwin"
+    asset_id: str = "robotwin"
+
+    # Where the per-task subdirs live.
+    data_root: str = "/data/zhaoqc/RoboTwin/data"
+
+    # Task → relative weight. Empty dict → use lap.datasets.robotwin_dataset
+    # DEFAULT_DATASET_WEIGHTS. A dict can both extend the default mix or
+    # restrict it (only datasets present here AND on disk are used).
+    dataset_weights: tuple[tuple[str, float], ...] = (
+        ("pick_place_primitive", 0.5),
+        ("arrange_blocks_line", 1.0),
+        ("arrange_blocks_l_shape", 1.0),
+        ("arrange_blocks_u_shape", 1.0),
+        ("stack_blocks_n_stack_n_v1_open_K3", 1.0),
+    )
+
+    # Cascade-VLA placement params (mirror BridgeECoTDataConfig). p_plan controls
+    # plan-as-target sampling; p_full_reasoning controls how often a mid-phase
+    # frame emits the full 3-segment cascade vs the action-vector-only
+    # (Context 1 no-reason) layout. Phase-boundary frames always emit full
+    # cascade — see RoboTwinTaskDataset._is_phase_boundary.
+    p_plan: float = 0.15
+    p_full_reasoning: float = 0.20
+    max_episodes_per_dataset: int | None = None
+
+    # Disable RLDS/LeRobot path resolution.
+    rlds_data_dir: str = ""
+
+    @property
+    def dataset_weights_dict(self) -> dict[str, float]:
+        return dict(self.dataset_weights)
+
+    @override
+    def _create_data_transforms(
+        self, base_cfg: DataConfig, model_config: _model.BaseModelConfig
+    ) -> upstream_transforms.Group:
+        # Samples already arrive in the schema TokenizePromptAndReasoning expects
+        # (image dict, prompt/language_actions/langact/plan, state, actions).
+        return upstream_transforms.Group(inputs=[], outputs=[])
+
+    @override
+    def _create_model_transforms(
+        self, base_cfg: DataConfig, model_config: _model.BaseModelConfig
+    ) -> upstream_transforms.Group:
+        return ModelTransformFactory(
+            prompt_format=model_config.prompt_format,
+            prediction_format=model_config.prediction_format,
+            gemma3_tokenizer_path=base_cfg.gemma3_tokenizer_path,
+        )(model_config)
+
+
+@dataclasses.dataclass(frozen=True)
 class BridgeECoTDataConfig(BaseDataConfigFactory):
     """Config for cascade-VLA pretraining on Bridge V2 + Embodied-CoT annotations.
 

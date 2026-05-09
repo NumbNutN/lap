@@ -1017,6 +1017,125 @@ PARSED SEGMENTS  (model output  vs  ground truth)
 
 ---
 
+### 13.11 Marker-Loss-Coverage Bug & 修复（2026-05-07）
+
+#### 现象
+
+跑完第一个里程碑 ckpt（step 10000，langact_loss=1.11）后用 [scripts/test_cascade_inference.py](scripts/test_cascade_inference.py) 做 smoke test：
+
+| 项 | 结果 |
+|----|------|
+| Task | "Move the wooden arch onto the table." |
+| 模型生成（前两句）| "Move to the wooden arch, grasp the wooden arch, move the wooden arch to the table, release the wooden arch. Move the arm away from the table." |
+| 模型生成（其余 22 句）| 重复 "Move the arm to the starting position." |
+| `[plan]`/`[stage]`/`[action]` marker 出现次数 | **0** |
+
+第一句语义对齐 GT plan（"Reach/Grasp/Move/Drop" 同义改写），说明模型**学到了任务语义**；但**完全没产出 cascade 标注**，并出现典型的 early-stage **mode collapse**（重复退化）。
+
+#### 调查 — Mask 覆盖率验证
+
+写 [scripts/inspect_marker_loss_coverage.py](scripts/inspect_marker_loss_coverage.py) 把同一个真实 Bridge sample 用三种 Context 跑 tokenize 并打印每个 token 的 mask 位：
+
+| Context | Marker | `ar_target_mask` 覆盖（bug 时）|
+|---------|--------|-------|
+| 1 (legacy) | `[stage]` | **0/3** |
+| 2 (plan-in-prompt) | `[plan]` | 0/3（√，在 prompt 里）|
+| 2 | `[stage]` | **0/3** |
+| 2 | `[action]` | **0/3** |
+| 3 (full cascade) | `[plan]` | **0/3** |
+| 3 | `[stage]` | **0/3** |
+| 3 | `[action]` | **0/3** |
+
+回查 [tokenizer.py `_create_segmented_masks` 的 docstring](src/lap/models/tokenizer.py#L193) 也明确写了："The literal segment markers ... are not covered by any of the per-segment masks ... their CE loss participates via `ar_target_mask` only when they fall inside one of the spans — **which by construction they do not**."
+
+所以**这是设计本身的问题**，不是 bug。原始设计假设 marker 是 deterministic 的字面文本、模型不需要梯度也能"自然出现"。但实际效果证明 next-token CE 不在 marker 位置的话，模型无任何动机产出它们 —— inference 时直接跳过 marker 输出 plan 内容。
+
+#### 修复
+
+[tokenizer.py](src/lap/models/tokenizer.py)：把每段（plan / stage / action）的 `start_index` 向前扩到 leading marker 的位置：
+
+```diff
+ if plan_position == "target":
+-    plan_start, plan_end = plan_text_start, plan_text_end
++    plan_start, plan_end = plan_marker_start, plan_text_end  # include marker
+
+ # [stage]:
++stage_marker_start = len(tokens)
+ stage_marker = self._tokenizer.encode(" [stage] ", ...)
+ tokens += stage_marker
+-stage_start = len(tokens)             # was: at content start
+ tokens += self._tokenizer.encode(clean_reason, ...)
+ stage_end = len(tokens)
++stage_start = stage_marker_start      # extend backward to cover marker
+
+ # [action]: same pattern
+```
+
+修复后 inspector 重跑：
+
+| Context | Marker | After |
+|---------|--------|-------|
+| 1 | `[stage]` | **3/3 ✅** |
+| 2 | `[stage]` | **3/3 ✅** |
+| 2 | `[action]` | **3/3 ✅** |
+| 3 | `[plan]` | **3/3 ✅** |
+| 3 | `[stage]` | **3/3 ✅** |
+| 3 | `[action]` | **3/3 ✅** |
+
+`ar_target_mask` 总和：Context 3 从 47 → 59（+12 token 进入 CE 梯度，dilution 约 25%；可接受，因为 marker 是固定 3-token 短语，模型学起来 trivial 但梯度信号必须要给）。
+
+#### 训练侧影响
+
+- **代码改动只动 mask 不改 token sequence**：旧 ckpt 的 params shape 完全兼容，可直接用 `--resume` 加载。
+- **首次 resume 后 1-2K 步会出现 langact_loss 短暂上升**（约 +0.3-0.5）：因为 marker 位置首次被 supervise，模型从未见过梯度。预期会快速降回。
+- **Marker token 在 PaliGemma 词表里是普通字面字符**（不是特殊 reserved token），所以模型直接学会"emit `[plan]` 然后 emit plan_text"是一个 N-gram 级别的简单 binding，不需要架构改动。
+
+#### 操作记录
+
+```bash
+# 1. 写本节文档（你正在读的这段）
+# 2. kubectl cp src/lap/models/tokenizer.py 到 pod
+# 3. 优雅 kill 当前训练（SIGTERM 让 wandb 写出 summary）
+# 4. 等 GPU 释放
+# 5. 重启 train.py（同一 --exp-name lap_bridge_pretrain_run1，config.resume=True
+#    自动从最新 ckpt = step 10000 接起）
+# 6. 监控 langact_loss：预期 step 10001-10100 左右出现 0.3-0.5 的 spike，
+#    然后 ~step 11500 降回 1.1 以下
+# 7. step 12000 + 14000 + 20000 时再跑 inference smoke test 确认 marker 出现
+```
+
+下次 inference 期望输出形式（与 GT 对照）：
+
+```
+[plan] Reach for the wooden arch. Grasp the wooden arch. Move the wooden arch to the table. ...
+[stage] The wooden arch is the object that needs to be moved...
+[action] Reach for the wooden arch.
+```
+
+#### 验证结果（step 14000，fix 后训了 2K 步）
+
+实测推理输出（同一 Bridge sample idx=0，CPU greedy）：
+
+```
+[plan]  Move to the wooden arch, grasp the wooden arch, move the wooden arch to the table, release the wooden arch.
+[stage] The wooden arch is the first object that needs to be interacted with.
+[action] Move to the wooden arch.
+```
+
+总输出 56 tokens + **EOS reached**（vs step 10000 的 200 tokens 无 EOS + 22 次重复）。
+
+| 验证项 | 结果 |
+|--------|------|
+| 三段 marker 全部出现 | ✅ |
+| EOS 触发 | ✅ |
+| Mode collapse 消失 | ✅ |
+| 语义对齐 GT（paraphrase-level）| ✅ |
+| 训练 step 数代价 | 仅 2K 步（11min wallclock）|
+
+后续步数（28K / 56K / 80K）出更高质量输出（更接近字面 GT），并能区分 plan-as-prompt 与 plan-as-target 两种模式下的行为差异。
+
+---
+
 ## 8. 留给用户的决策点
 
 1. **图像数据源**：请确认走 §4.3 的哪一条（推荐 II = HF LeRobot bridge_orig）。需要约 ~50 GB 磁盘空间和约 1 小时下载时间。

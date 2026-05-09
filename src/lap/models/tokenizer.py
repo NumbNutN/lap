@@ -192,11 +192,17 @@ class BaseTokenizer(ABC):
 
         Note:
             The literal segment markers (``[plan]``, ``[stage]``, ``[action]``)
-            are encoded as text and live BETWEEN the spans; they are not covered
-            by any of the per-segment masks. They are part of ``attn_mask`` (so
-            they are valid positions for attention) but their CE loss participates
-            via ``ar_target_mask`` only when they fall inside one of the spans —
-            which by construction they do not.
+            ARE included in their owning segment's start index by ``tokenize`` —
+            i.e., for plan_position="target" the ``[plan]`` marker counts toward
+            ``plan_mask`` and hence ``ar_target_mask``; the ``[stage]`` marker
+            counts toward ``stage_mask`` whenever a stage segment is present;
+            the ``[action]`` marker is part of the (derived) action span. This
+            ensures the model gets next-token CE gradient on emitting the cascade
+            grammar markers themselves; without it, an empirical inference run
+            at step 10000 produced fluent plan text but zero markers because
+            marker positions had no loss signal (see §13.11). The contract of
+            this helper is unchanged — it just sets per-position bits — but the
+            *definition* of each segment now includes its leading marker.
         """
         attn_mask = np.zeros(self._max_len, dtype=bool)
         token_loss_mask = np.ones(self._max_len, dtype=bool)
@@ -400,10 +406,15 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
 
         # Insert the [plan] segment — marker is always present when plan is involved.
         # If plan_position == "prompt", plan_text follows the marker inside the prompt.
-        # If plan_position == "target", plan_text starts the AR target span.
+        # If plan_position == "target", plan_text starts the AR target span and the
+        # ``[plan]`` marker itself joins the AR target so the model is trained to
+        # emit the marker after the prompt (otherwise it has no gradient to learn
+        # the cascade-VLA token grammar — see §13.11 in
+        # cascade-bridge-pretraining-discussion.md).
         plan_start = len(tokens)
         plan_end = len(tokens)
         if plan_position != "none" and plan is not None and plan.strip():
+            plan_marker_start = len(tokens)
             plan_marker_tokens = self._tokenizer.encode(" [plan] ", add_bos=False, add_eos=False)
             tokens += plan_marker_tokens
             clean_plan = plan.strip().replace("_", " ").replace("\n", " ")
@@ -412,34 +423,39 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
             tokens += plan_text_tokens
             plan_text_end = len(tokens)
             if plan_position == "target":
-                # plan_text is part of AR target.
-                plan_start, plan_end = plan_text_start, plan_text_end
-            # else "prompt": plan_text stays in prompt; plan_mask remains empty (start==end).
+                # plan_text + leading [plan] marker are part of the AR target.
+                plan_start, plan_end = plan_marker_start, plan_text_end
+            # else "prompt": plan + marker stay in prompt; plan_mask remains empty.
 
-        # [stage] segment (=stage reasoning, always AR target when present).
+        # [stage] segment (=stage reasoning, always AR target when present). The
+        # leading ``[stage]`` marker is included in the segment so the model is
+        # trained to emit it after the preceding plan/prompt content.
         stage_start = len(tokens)
         stage_end = len(tokens)
         if reasoning is not None:
+            stage_marker_start = len(tokens)
             stage_marker = self._tokenizer.encode(" [stage] ", add_bos=False, add_eos=False)
             tokens += stage_marker
             clean_reason = reasoning.strip().replace("_", " ").replace("\n", " ")
-            stage_start = len(tokens)
             # Suppress EOS here when langact follows; EOS goes after [action] span.
             tokens += self._tokenizer.encode(
                 clean_reason, add_bos=False, add_eos=(langact is None)
             )
             stage_end = len(tokens)
+            stage_start = stage_marker_start  # extend backward to cover the marker.
 
-        # [action] segment (=langact, always AR target when present).
+        # [action] segment (=langact, always AR target when present). Includes the
+        # leading ``[action]`` marker for the same reason as [stage].
         action_start = len(tokens)
         action_end = len(tokens)
         if langact is not None:
+            action_marker_start = len(tokens)
             action_marker = self._tokenizer.encode(" [action] ", add_bos=False, add_eos=False)
             tokens += action_marker
-            action_start = len(tokens)
             clean_langact = langact.strip().replace("_", " ").replace("\n", " ")
             tokens += self._tokenizer.encode(clean_langact, add_bos=False, add_eos=True)
             action_end = len(tokens)
+            action_start = action_marker_start  # extend backward to cover the marker.
 
         # Truncate to max length and clamp all segment indices.
         if len(tokens) > self._max_len:

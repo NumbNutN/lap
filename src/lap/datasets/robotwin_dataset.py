@@ -43,7 +43,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 DEFAULT_ROBOTWIN_DATA_ROOT = pathlib.Path(
-    "/data/zhaoqc/RoboTwin/data"  # path on the pod; override locally via constructor
+    "/data/.cache/RoboTwin"  # path on the pod where the data agent rsyncs episodes
 )
 
 # Datasets in the Stage 2 mix and their nominal sampling weights. Override via
@@ -53,7 +53,10 @@ DEFAULT_DATASET_WEIGHTS: dict[str, float] = {
     "arrange_blocks_line": 1.0,
     "arrange_blocks_l_shape": 1.0,
     "arrange_blocks_u_shape": 1.0,
-    "stack_blocks_n_stack_n_v1_open_K3": 1.0,
+    "arrange_blocks_i_shape": 1.0,
+    # The available stack-blocks variant on the pod is the K=2 ("v1_open") build;
+    # the earlier _K3 (3-tier) snapshot was retired by the data-collection agent.
+    "stack_blocks_n_stack_n_v1_open": 1.0,
 }
 
 # Slot in the LAP image dict that the active wrist camera lands in. Even though
@@ -345,6 +348,22 @@ class RoboTwinTaskDataset:
                 return True
         return False
 
+    @staticmethod
+    def _safe_end_frame(phases: list[dict], n_frames: int) -> int:
+        """Return cutoff frame index. Frames < safe_end belong only to successful
+        phases; action chunks of horizon H must satisfy ``frame_idx + H <= safe_end``.
+
+        Strategy: prefix-truncate at the FIRST phase with ``success=False``. Any
+        recovery / cleanup frames after a failure (even if labeled success=True)
+        are discarded because the trajectory has already diverged from the
+        nominal task distribution. This matches the conservative "drop-forward
+        on failure" policy from the user's design call.
+        """
+        for ph in phases:
+            if not ph.get("success", True):
+                return int(ph["start_frame"])
+        return n_frames
+
     # ----- main iteration -----
 
     def iter_samples(self, max_samples: Optional[int] = None) -> Iterator[dict]:
@@ -365,12 +384,29 @@ class RoboTwinTaskDataset:
             hdf5 = self._hdf5_path(ep)
             if not hdf5.exists():
                 continue
-            # Iterate frames in random order (sampling within episode).
-            frame_indices = list(range(n_frames))
+            # Truncate at the first failed phase (if any). Frames in [safe_end, n)
+            # are dropped, AND we further restrict so the action chunk
+            # ``actions[t:t+H]`` never crosses safe_end (i.e., t + H <= safe_end).
+            safe_end = self._safe_end_frame(phases, n_frames)
+            usable_end = safe_end - self.action_horizon
+            if usable_end <= 0:
+                # Failure too early to extract any clean (image, action_chunk) pair.
+                logger.debug(
+                    "Skipping ep %d/%s: safe_end=%d <= action_horizon=%d (failure starts too early)",
+                    ep, self.dataset_name, safe_end, self.action_horizon,
+                )
+                continue
+            # Iterate frames in random order within the usable prefix.
+            frame_indices = list(range(usable_end))
             self._rng.shuffle(frame_indices)
             for frame_idx in frame_indices:
                 phase_idx, phase = self._phase_for_frame(phases, frame_idx)
                 if phase is None:
+                    continue
+                # Defensive: phase containing this frame must have success=True.
+                # Implied by safe_end truncation, but guards against odd metadata
+                # (e.g., gap between phases or out-of-order failure flags).
+                if not phase.get("success", True):
                     continue
                 sample = self._build_sample(meta, phase_idx, phase, ep, frame_idx)
                 if sample is None:

@@ -119,7 +119,7 @@ class BaseTokenizer(ABC):
         reasoning_start: int,
         reasoning_end: int,
         has_reasoning: bool,
-    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Create base attention and reasoning masks.
 
         Args:
@@ -133,20 +133,25 @@ class BaseTokenizer(ABC):
 
         Note:
             In legacy single-segment mode this returns the "langact"-style mask
-            covering everything between reasoning_start and reasoning_end. For the
-            cascade-VLA two-segment format use `_create_segmented_masks` below to
-            also obtain a reasoning-only sub-mask.
+            covering everything between reasoning_start and reasoning_end. When
+            ``has_reasoning`` is False (action-vector-only / Context 1 sample),
+            ``reasoning_mask`` is returned as an all-False tensor (NOT ``None``)
+            so that mixed-Context batches collate cleanly via ``jax.tree.map``.
+            All downstream consumers (``lap.py``, ``lap_gemma3.py``,
+            ``model_adapter``) treat ``None`` and an all-False tensor identically
+            (a quick grep confirms each ``is None`` branch constructs the
+            equivalent all-False tensor).
         """
         attn_mask = np.zeros(self._max_len, dtype=bool)
         token_loss_mask = np.ones(self._max_len, dtype=bool)
+        reasoning_mask = np.zeros(self._max_len, dtype=bool)
 
         # Mark all non-pad positions as valid for attention
         attn_mask[:token_count] = True
 
         if not has_reasoning:
-            return attn_mask, None, token_loss_mask
+            return attn_mask, reasoning_mask, token_loss_mask
 
-        reasoning_mask = np.zeros(self._max_len, dtype=bool)
         start_idx = max(0, min(self._max_len, reasoning_start))
         end_idx = max(0, min(self._max_len, reasoning_end))
         if end_idx > start_idx:
@@ -468,14 +473,17 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
             action_end = min(action_end, self._max_len)
 
         # Branch: legacy single-segment path (back-compat) vs new segmented path.
+        # In both branches we always return TENSORS (never ``None``) for every
+        # mask so that mixed-Context batches collate cleanly through
+        # ``jax.tree.map``. Empty/inactive masks are simply all-False.
         is_legacy = (langact is None) and (plan_position == "none")
         if is_legacy:
-            # Legacy: ar_target_mask covers reasoning span only; stage/plan are None.
+            # Legacy: ar_target_mask covers reasoning span only.
             attn_mask, ar_target_mask, token_loss_mask = self._create_base_masks(
                 len(tokens), stage_start, stage_end, reasoning is not None
             )
-            stage_mask = None
-            plan_mask = None
+            stage_mask = np.zeros(self._max_len, dtype=bool)
+            plan_mask = np.zeros(self._max_len, dtype=bool)
         else:
             attn_mask, ar_target_mask, plan_mask, stage_mask, token_loss_mask = (
                 self._create_segmented_masks(
@@ -486,9 +494,11 @@ class PaligemmaTokenizer(_tokenizer.PaligemmaTokenizer, BaseTokenizer):
                 )
             )
 
-        if ar_target_mask is None or not ar_target_mask.any():
-            number_mask = None
-            direction_mask = None
+        if not ar_target_mask.any():
+            # No AR target span: no reasoning dropout needed, and number/direction
+            # masks default to all-False (still tensors for collate stability).
+            number_mask = np.zeros(self._max_len, dtype=bool)
+            direction_mask = np.zeros(self._max_len, dtype=bool)
         else:
             token_loss_mask = self._apply_reasoning_dropout(token_loss_mask, ar_target_mask, is_vqa_sample)
             number_mask, direction_mask = self._build_number_direction_masks(

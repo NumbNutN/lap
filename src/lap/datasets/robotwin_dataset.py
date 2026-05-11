@@ -271,12 +271,39 @@ class _RoboTwinHDF5Reader:
             out = np.concatenate([out, pad], axis=0)
         return out
 
-    def read_state(self, hdf5_path: pathlib.Path, frame_idx: int) -> np.ndarray:
-        """Read 14-d state = [left_endpose 7d || right_endpose 7d] at ``frame_idx``."""
+    def read_state(
+        self, hdf5_path: pathlib.Path, frame_idx: int, *, state_kind: str = "qpos"
+    ) -> np.ndarray:
+        """Read 14-d state at ``frame_idx``.
+
+        Two physical interpretations are supported and the choice MUST match
+        what the eval driver feeds (see ``policy/lap/deploy_policy.py::encode_obs``):
+
+          * ``"qpos"`` (default, **recommended for sim**) — Joint-space:
+            ``joint_action/vector[t]`` = ``[left_arm(6) || left_gripper(1) ||
+            right_arm(6) || right_gripper(1)]``. This matches what the
+            RoboTwin sim returns at runtime as
+            ``observation["joint_action"]["vector"]``, so the action expert
+            sees the same physical quantity at train and eval time.
+          * ``"endpose"`` — Cartesian:
+            ``[left_endpose(7) || right_endpose(7)]`` = ``(x,y,z, qx,qy,qz,qw)``
+            per arm. Kept for backwards compatibility with the v0 (run0)
+            Stage 2 ckpt that was trained with this. **Mismatched** with
+            the sim eval state in the current driver and will produce the
+            chunk-boundary trajectory jumps observed in eval videos.
+        """
         h = self._open(hdf5_path)
-        left = np.asarray(h["endpose/left_endpose"][frame_idx], dtype=np.float32)
-        right = np.asarray(h["endpose/right_endpose"][frame_idx], dtype=np.float32)
-        return np.concatenate([left, right], axis=0)
+        if state_kind == "qpos":
+            # `joint_action/vector` is the qpos target at frame t (= the qpos
+            # actually executed for that frame in demo_clean data, since
+            # demo_clean stores the executed qpos verbatim). Same physical
+            # quantity the sim returns via `observation["joint_action"]["vector"]`.
+            return np.asarray(h["joint_action/vector"][frame_idx], dtype=np.float32)
+        if state_kind == "endpose":
+            left = np.asarray(h["endpose/left_endpose"][frame_idx], dtype=np.float32)
+            right = np.asarray(h["endpose/right_endpose"][frame_idx], dtype=np.float32)
+            return np.concatenate([left, right], axis=0)
+        raise ValueError(f"Unknown state_kind={state_kind!r}; expected 'qpos' or 'endpose'.")
 
 
 # ----------------------------------------------------------------------------
@@ -299,6 +326,11 @@ class RoboTwinTaskDataset:
     image_size: tuple[int, int] = (224, 224)
     max_episodes: Optional[int] = None
     seed: int = 0
+    # Physical interpretation of the 14-d state vector fed to the model.
+    # See ``_RoboTwinHDF5Reader.read_state``. Default "qpos" aligns with the
+    # sim eval driver (``policy/lap/deploy_policy.py::encode_obs``); use
+    # "endpose" only to reproduce the v0/run0 (mismatched) ckpt.
+    state_kind: str = "qpos"
 
     def __post_init__(self):
         self.task_dir = pathlib.Path(self.task_dir)
@@ -457,7 +489,9 @@ class RoboTwinTaskDataset:
 
         # 5. Action chunk + state.
         actions = self._reader.read_actions(self._hdf5_path(episode), frame_idx, self.action_horizon)
-        state = self._reader.read_state(self._hdf5_path(episode), frame_idx)
+        state = self._reader.read_state(
+            self._hdf5_path(episode), frame_idx, state_kind=self.state_kind
+        )
 
         # 6. Pack into the bridge-compatible per-step sample dict.
         return {
@@ -512,6 +546,8 @@ class RoboTwinMixedDataset:
     image_size: tuple[int, int] = (224, 224)
     max_episodes_per_dataset: Optional[int] = None
     seed: int = 0
+    # State space for the 14-d state vector. See RoboTwinTaskDataset.state_kind.
+    state_kind: str = "qpos"
 
     def __post_init__(self):
         self.data_root = pathlib.Path(self.data_root)
@@ -531,6 +567,7 @@ class RoboTwinMixedDataset:
                     image_size=self.image_size,
                     max_episodes=self.max_episodes_per_dataset,
                     seed=self.seed + abs(hash(name)) % 1000,
+                    state_kind=self.state_kind,
                 )
             except FileNotFoundError as e:
                 logger.warning("RoboTwin task %s init failed, skipping: %s", name, e)

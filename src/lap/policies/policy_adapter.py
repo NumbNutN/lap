@@ -59,3 +59,59 @@ class ARPolicy:
         """
 
         return self.infer_reasoning(obs)
+
+
+class DualModePolicy:
+    """Policy wrapper that emits BOTH flow-sampled actions and cascade text.
+
+    The websocket server calls ``policy.infer(obs)`` and packs the returned
+    dict to the client. We piggy-back the cascade-text path on each inference
+    so the client (LAP eval driver) can overlay ``[plan]/[stage]/[action]``
+    text on rollout videos.
+
+    Internals:
+      * ``_flow`` is the regular ``_policy.Policy`` returned by
+        ``create_trained_policy`` — produces ``actions``.
+      * ``_ar`` is an :class:`ARPolicy` sharing the same underlying model,
+        used only for ``infer_reasoning`` (which calls ``sample_tokens``).
+      * The result of ``_ar.infer_reasoning`` is passed through
+        ``DetokenizeReasoning`` (already in the model_transforms.outputs of the
+        train config), so the merged dict carries a ``reasoning`` string.
+
+    Notes:
+      * Cost: doubles inference latency. Acceptable for sim eval but should
+        be toggled off for high-frequency real-robot use.
+      * Both calls share the obs dict; they are independent samples (different
+        RNG splits) but driven by the same conditioning.
+    """
+
+    def __init__(self, flow: _policy.Policy, ar: "ARPolicy"):
+        self._flow = flow
+        self._ar = ar
+
+    def __getattr__(self, name: str):
+        # Delegate any unknown attribute (e.g. ``metadata``) to the flow
+        # policy — that's what the websocket server reads.
+        return getattr(self._flow, name)
+
+    @property
+    def metadata(self):
+        return self._flow.metadata
+
+    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:
+        # 1) cascade text (AR path).
+        try:
+            ar_out = self._ar.infer_reasoning(obs)
+            reasoning_text = ""
+            for key in ("reasoning", "reasoning_text", "text"):
+                val = ar_out.get(key)
+                if isinstance(val, str) and val.strip():
+                    reasoning_text = val.strip()
+                    break
+        except Exception as e:  # never fail the whole infer because of the text branch
+            reasoning_text = f"<reasoning error: {type(e).__name__}: {e}>"
+
+        # 2) action chunk (flow path).
+        flow_out = self._flow.infer(obs, noise=noise)
+        flow_out["reasoning_text"] = reasoning_text
+        return flow_out

@@ -347,6 +347,17 @@ class RoboTwinDataConfig(BaseDataConfigFactory):
     p_full_reasoning: float = 0.20
     max_episodes_per_dataset: int | None = None
 
+    # State space for the 14-d ``state`` vector emitted to the model.
+    # See ``RoboTwinTaskDataset.state_kind`` for the two semantics.
+    #
+    # * "qpos" (default + recommended for sim eval) — joint-space (= same
+    #   physical quantity the sim returns as ``observation["joint_action"]
+    #   ["vector"]``). Action target ``joint_action/vector`` is also qpos,
+    #   so state and action live in one space. This is the alignment that
+    #   fixes the chunk-boundary trajectory jumps observed in run0 eval.
+    # * "endpose" — Cartesian (run0 setting, preserved for back-compat).
+    state_kind: str = "qpos"
+
     # Disable RLDS/LeRobot path resolution.
     rlds_data_dir: str = ""
 
@@ -1104,6 +1115,7 @@ _CONFIGS = [
             # stack_blocks_n_stack_n_v1_open(1.0).
             p_plan=0.15,
             p_full_reasoning=0.20,    # 80% mid-phase frames are action-only (Context 1)
+            state_kind="endpose",     # v0/run0: Cartesian endpose (mismatched with sim eval state)
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1000,
@@ -1120,6 +1132,74 @@ _CONFIGS = [
         keep_period=10_000,
         num_train_steps=30_001,
         batch_size=96,
+        ema_schedule_choice=EmaScheduleChoice(kind="disabled"),
+    ),
+    # =========================================================================
+    # Stage 2 v1: state-aligned re-train.
+    # =========================================================================
+    # Differs from v0 (`lap_robotwin_finetune`) in exactly two places:
+    #   1. ``RoboTwinDataConfig.state_kind = "qpos"`` — the 14-d state vector
+    #      emitted at train time is now the joint-space qpos
+    #      (``joint_action/vector[t]``), matching what the sim eval driver
+    #      sends at inference time (``observation["joint_action"]["vector"]``).
+    #      This is the fix for the chunk-boundary trajectory jumps observed
+    #      in run0 sim eval (state input was Cartesian endpose during training
+    #      but joint qpos at eval — two completely different physical
+    #      quantities). See README in policy/lap/ for the diagnosis.
+    #   2. Pod-fit knobs for the new 5×H200 (80 GB / GPU, 82Gi RAM, 16 CPU)
+    #      allocation in values-keepalive.yaml:
+    #        * ``batch_size = 80`` — 16 / GPU × 5 GPUs, same per-device load as
+    #          the 6×H100 v0 run (which used 96 / 6 = 16). Activation memory
+    #          footprint preserved.
+    #        * ``fsdp_devices = 5`` — full FSDP across all 5 GPUs. Optimizer
+    #          state + master weights + grads are sharded ×5, reducing
+    #          per-GPU non-activation footprint from ~37 GB → ~7.4 GB.
+    #        * ``num_workers`` is hard-wired to 0 inside the RoboTwin loader
+    #          (HDF5 handles aren't fork-safe), so this is config-irrelevant.
+    # All other hyperparameters are identical to v0 so the comparison is clean.
+    TrainConfig(
+        name="lap_robotwin_finetune_qpos",
+        model=lap_config.LAPConfig(
+            action_dim=14,
+            action_horizon=8,
+            max_token_len=320,
+            pi05=True,
+            discrete_state_input=False,
+            enable_action_training=True,
+            enable_langact_training=True,
+            enable_prediction_training=False,
+            enable_vqa_training=False,
+            action_attention_mode="lap_original",
+            stop_grad_mode="full",
+            cascade_unmask_plan=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            prompt_format="lap",
+            language_loss_weight=0.5,
+            enable_image_augmentation=True,
+        ),
+        data=RoboTwinDataConfig(
+            data_root="/data/.cache/RoboTwin",
+            p_plan=0.15,
+            p_full_reasoning=0.20,
+            state_kind="qpos",         # ← the fix
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=2e-5,
+            decay_steps=30_000,
+            decay_lr=2e-6,
+        ),
+        weight_loader=weight_loaders.WeightLoaderChoice(
+            kind="checkpoint",
+            params_path="checkpoints/lap_bridge_pretrain/lap_bridge_pretrain_run1/50000/params",
+        ),
+        allow_partial_weights=True,    # 7→14 action head re-init from Stage 1 ckpt
+        save_interval=2_000,
+        keep_period=10_000,
+        num_train_steps=30_001,
+        batch_size=80,                  # ← 16 / GPU × 5 GPUs (was 96 = 16 × 6)
+        fsdp_devices=5,                 # ← full FSDP across the 5-GPU pod
         ema_schedule_choice=EmaScheduleChoice(kind="disabled"),
     ),
     *upstream_config._CONFIGS,  # noqa: SLF001

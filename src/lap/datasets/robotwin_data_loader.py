@@ -136,6 +136,7 @@ def create_robotwin_data_loader(
         image_size=tuple(train_config.model.image_resolution),
         max_episodes_per_dataset=getattr(cfg, "max_episodes_per_dataset", None),
         seed=seed,
+        state_kind=getattr(cfg, "state_kind", "qpos"),
     )
     logger.info(
         "RoboTwinMixedDataset ready: tasks=%s",

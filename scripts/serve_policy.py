@@ -41,7 +41,11 @@ class Checkpoint:
     config: str
     # Checkpoint directory (e.g., "checkpoints/pi0_aloha_sim/exp/10000").
     dir: str
-    type: Literal["flow", "ar"] = "flow"
+    # ``flow``  → action expert flow sampling, returns ``actions`` only.
+    # ``ar``    → AR sampling of cascade tokens, returns decoded text.
+    # ``dual``  → run BOTH per inference; response carries ``actions`` + ``reasoning_text``.
+    #             Used for sim eval so video overlay can show cascade output.
+    type: Literal["flow", "ar", "dual"] = "flow"
 
 
 @dataclasses.dataclass
@@ -69,7 +73,10 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     EnvMode.LAP_ROBOTWIN: Checkpoint(
         config="lap_robotwin_finetune",
         dir="checkpoints/lap_robotwin_finetune/lap_robotwin_run0/30000",
-        type="flow",
+        # Dual mode: server emits actions (flow) + cascade reasoning_text (AR)
+        # per request, so sim eval can overlay the [plan]/[stage]/[action] text
+        # on rollout videos. ~2× inference latency.
+        type="dual",
     ),
     EnvMode.PI05_DROID: Checkpoint(config="pi05_droid", dir="gs://openpi-assets/checkpoints/pi05_droid", type="flow"),
 }
@@ -95,6 +102,16 @@ def create_policy(args: Args) -> _policy.Policy:
         return _policy_config.create_trained_policy(
             config, checkpoint.dir, default_prompt=args.default_prompt
         )
+    if checkpoint.type == "dual":
+        # Build the flow policy once, then wrap its underlying model in an
+        # ARPolicy for the cascade-text path. We deliberately reuse the
+        # same loaded params so this costs no extra GPU memory.
+        from lap.policies.policy_adapter import ARPolicy, DualModePolicy
+        flow_policy = _policy_config.create_trained_policy(
+            config, checkpoint.dir, default_prompt=args.default_prompt
+        )
+        ar_policy = ARPolicy(flow_policy)
+        return DualModePolicy(flow=flow_policy, ar=ar_policy)
     raise NotImplementedError
 
 

@@ -25,6 +25,10 @@ class EnvMode(enum.Enum):
     LAP_AR = "lap_ar"
     # LAP-3B fine-tuned on LIBERO
     LAP_LIBERO = "lap_libero"
+    # Cascade-VLA Stage 2: LAP-3B (PaliGemma 2B + 300M action expert) finetuned
+    # on the RoboTwin task suite (pick_place / arrange_blocks / stack_blocks).
+    # 14-DoF bimanual action head, head_camera as base + active arm wrist.
+    LAP_ROBOTWIN = "lap_robotwin"
     # Open-sourced baseline model from Physical Intelligence
     PI05_DROID = "pi05_droid"
 
@@ -62,6 +66,11 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     EnvMode.LAP: Checkpoint(config="lap", dir="checkpoints/lap", type="flow"),
     EnvMode.LAP_AR: Checkpoint(config="lap", dir="checkpoints/lap", type="ar"),
     EnvMode.LAP_LIBERO: Checkpoint(config="lap_libero", dir="checkpoints/lap_libero", type="flow"),
+    EnvMode.LAP_ROBOTWIN: Checkpoint(
+        config="lap_robotwin_finetune",
+        dir="checkpoints/lap_robotwin_finetune/lap_robotwin_run0/30000",
+        type="flow",
+    ),
     EnvMode.PI05_DROID: Checkpoint(config="pi05_droid", dir="gs://openpi-assets/checkpoints/pi05_droid", type="flow"),
 }
 

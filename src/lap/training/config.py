@@ -322,8 +322,9 @@ class RoboTwinDataConfig(BaseDataConfigFactory):
     repo_id: str = "robotwin"
     asset_id: str = "robotwin"
 
-    # Where the per-task subdirs live.
-    data_root: str = "/data/zhaoqc/RoboTwin/data"
+    # Where the per-task subdirs live (default = pod path; override locally for
+    # smoke tests).
+    data_root: str = "/data/.cache/RoboTwin"
 
     # Task → relative weight. Empty dict → use lap.datasets.robotwin_dataset
     # DEFAULT_DATASET_WEIGHTS. A dict can both extend the default mix or
@@ -333,7 +334,8 @@ class RoboTwinDataConfig(BaseDataConfigFactory):
         ("arrange_blocks_line", 1.0),
         ("arrange_blocks_l_shape", 1.0),
         ("arrange_blocks_u_shape", 1.0),
-        ("stack_blocks_n_stack_n_v1_open_K3", 1.0),
+        ("arrange_blocks_i_shape", 1.0),
+        ("stack_blocks_n_stack_n_v1_open", 1.0),
     )
 
     # Cascade-VLA placement params (mirror BridgeECoTDataConfig). p_plan controls
@@ -1045,6 +1047,79 @@ _CONFIGS = [
         # EMA disabled: keeps a second copy of params (~12GB) and tipped pod
         # memory over the 128GB cgroup limit during step 1 (OOMKilled).
         # Re-enable later if pod memory is increased.
+        ema_schedule_choice=EmaScheduleChoice(kind="disabled"),
+    ),
+    # ------------------------------------------------------------------
+    # Cascade-VLA Stage 2: action-expert finetune on RoboTwin task data.
+    # ------------------------------------------------------------------
+    # Decision rationale (see policy/lap/cascade-bridge-pretraining-discussion.md
+    # §A-D for Stage 2 / RoboTwin handover):
+    #   action_dim=14:     bimanual; layout = [left_arm 6 + left_gripper 1 +
+    #                      right_arm 6 + right_gripper 1] from joint_action/vector.
+    #                      Stage 1 ckpt has 7-d action head — `allow_partial_weights=True`
+    #                      lets the loader skip the shape-mismatched action head and
+    #                      re-init it (Q4 decision: re-init from scratch).
+    #   action_horizon=8:  ~0.27s @ 30 Hz; matches RoboTwin phase granularity.
+    #   stop_grad_mode=full + action_attention_mode=lap_original (Variant 0):
+    #                      C1 decision — full grad isolation for first run to
+    #                      protect the cascade-VLA marker output ability learned
+    #                      in Stage 1. Switch to "partial" later if VLM doesn't
+    #                      regress.
+    #   discrete_state_input=False: state is fed continuously to the action expert
+    #                      (not discretized into prompt bins).
+    #   weight_loader: load Stage 1 step-50000 ckpt. action head will be re-init
+    #                  via allow_partial_weights=True; VLM + paligemma + cascade
+    #                  marker emission ability all carry over.
+    #   peak_lr=2e-5:    half of Stage 1 (5e-5) — finetuning needs gentler
+    #                    updates so we don't wash out cascade language emission.
+    #   batch_size=96:   = 6 × 16, divisible by 6-GPU mesh.
+    TrainConfig(
+        name="lap_robotwin_finetune",
+        model=lap_config.LAPConfig(
+            action_dim=14,
+            action_horizon=8,
+            max_token_len=320,
+            pi05=True,
+            discrete_state_input=False,
+            # === Bimanual action expert ON ===
+            enable_action_training=True,
+            enable_langact_training=True,
+            enable_prediction_training=False,
+            enable_vqa_training=False,
+            # === Cascade-VLA Variant 0: full stop_grad, lap_original attn ===
+            action_attention_mode="lap_original",
+            stop_grad_mode="full",
+            cascade_unmask_plan=False,
+            # === Backbone (must match Stage 1 to share weights) ===
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            prompt_format="lap",
+            language_loss_weight=0.5,    # halved vs Stage 1; action loss is the
+                                         # primary objective in Stage 2.
+            enable_image_augmentation=True,
+        ),
+        data=RoboTwinDataConfig(
+            data_root="/data/.cache/RoboTwin",
+            # dataset_weights default: pick_place(0.5), arrange_blocks_{line,l,u,i}_shape(1.0 each),
+            # stack_blocks_n_stack_n_v1_open(1.0).
+            p_plan=0.15,
+            p_full_reasoning=0.20,    # 80% mid-phase frames are action-only (Context 1)
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=2e-5,
+            decay_steps=30_000,
+            decay_lr=2e-6,
+        ),
+        weight_loader=weight_loaders.WeightLoaderChoice(
+            kind="checkpoint",
+            params_path="checkpoints/lap_bridge_pretrain/lap_bridge_pretrain_run1/50000/params",
+        ),
+        allow_partial_weights=True,    # action head shape mismatch (7→14) → re-init
+        save_interval=2_000,
+        keep_period=10_000,
+        num_train_steps=30_001,
+        batch_size=96,
         ema_schedule_choice=EmaScheduleChoice(kind="disabled"),
     ),
     *upstream_config._CONFIGS,  # noqa: SLF001

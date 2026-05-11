@@ -1,0 +1,60 @@
+# LAP eval-driver config (consumed by `script/eval_policy.py` via
+# `policy/lap/eval.sh`). The local sim driver reads this YAML, opens a
+# WebSocket connection to the remote policy server (run on the pod via
+# `policy/lap/scripts/serve_policy.py`), forwards observations per
+# inference tick, and executes returned actions in the RoboTwin sim.
+
+# Basic experiment configuration (set via --overrides from eval.sh)
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# LAP server identifies the run by config name + checkpoint step
+train_config_name: null      # e.g. "lap_robotwin_finetune"
+model_name: null             # exp_name on the pod (e.g. "lap_robotwin_run0")
+checkpoint_id: 30000         # which milestone to load from <model_name>/<step>
+# Action chunk size and receding horizon (matches LAPConfig.action_horizon=8 in
+# Stage 2 training). exec_horizon controls how many actions to execute before
+# re-querying the model with a fresh observation. Set exec_horizon == pi0_step
+# to disable receding (= execute the full chunk every time).
+pi0_step: 8
+exec_horizon: 8
+
+# Remote inference server. The pod runs `serve_policy.py` on port 8000;
+# `kubectl port-forward` exposes it as localhost:8001 on the local sim host.
+server_host: localhost
+server_port: 8001
+
+# Retry on transient WebSocket failures (e.g. 1011 ping timeout, dropped
+# port-forward). The client will reconnect and re-send the same observation
+# up to `infer_max_retries` times with linear backoff.
+infer_max_retries: 3
+infer_retry_backoff_s: 1.0
+
+# CFG (Classifier-Free Guidance) — not used by the cascade-VLA Stage 2
+# checkpoint (no negative-prompt distillation done in Stage 2). Kept here
+# for parity with the pi05 eval config; leave at 0.0 to disable.
+guidance_scale: 0.0
+neg_prompts: null
+stage_neg_prompts: null
+
+# Use unified-style task instructions (no object-specific descriptions).
+# False here because RoboTwin task_prompts in Stage 2 do reference objects
+# (e.g. "Arrange the blocks into an L shape").
+unified_instructions: false
+
+# Save rollout data as HDF5 for later inspection / re-training.
+# Output goes to data/{task_name}/{task_config}_rollout/<model_name>/.
+save_rollout_data: true
+
+# Failure-recovery framework — disabled for the first round of LAP eval
+# (it depends on `policy/Your_Policy/eval_utils` which targets pi05; we
+# may wire it for LAP later if useful).
+rollout_capture:
+  enabled: false
+
+# Verbose mode: print per-inference diagnostics and save observation images
+verbose: false

@@ -10,6 +10,18 @@
 
 ---
 
+## 0. 决策快照（2026-05-12 讨论后）
+
+| 问题 | 短期决策（不重训） | 长期决策（要重训） |
+|---|---|---|
+| **1. last_arm stickiness** | ✅ 客户端解析 `[action]` 段；首帧用默认 wrist（任意，仅一帧）；arm-switch 时降级 exec_horizon=1 一步 | ⏸ 暂不动训练侧（per-phase 切已能用） |
+| **2. cascade 重生** | ✅ 方案 A：Plan 首帧 cache，stage/action 每次重生 | 🎯 **C2 + stage_completion_reasoning**：训练时构造"两 stage + 完成 reasoning + 新 stage"样本，模型自学何时切 stage（要重 Stage 1） |
+| **3. teacher-forcing gap** | ⏸ 暂缓 | ⏸ 等 C2 + A 结果再说 |
+| **4. overlay 排版** | ✅ 多行 + 字号 0.32 | — |
+| **5. 推理 profiling** | ✅ AR/flow 分项 + tokens 计数 | — |
+
+---
+
 ## 1. A1.b last_arm stickiness（哪只手腕摄像头）
 
 ### 1.1 背景
@@ -99,11 +111,34 @@ class LAP:
 **短期**：实现方案 1（客户端解析）。低成本，可立即测。
 **长期**：如果方案 1 不彻底解决问题，考虑方案 2（A1.b 训练侧）。
 
-### 1.6 待办
+### 1.6 实现状态（2026-05-12）
 
-- [ ] 客户端实现 cascade 解析 + last_arm 切换
-- [ ] 视频 overlay 显示当前 `wrist=left/right`（已有，但解析后会反映真实值）
-- [ ] 用 arrange_blocks 跑 eval 对比
+**客户端解析已实现** (`lap_model.py::_parse_arm_from_cascade`)：
+- 优先级 `[action]` → `[stage]` → `[plan]`，每段取**最后**出现的 left/right 信号
+- 匹配模式：`{left,right} {gripper,arm,hand}`
+- 6/6 smoke 测试通过
+- `reset_obsrvationwindows` 把 `last_arm` 复位回默认（目前是 `right`，可考虑改 `left`，第一帧实际任意都行）
+
+**arm-switch 紧急 1 步 exec 已实现** (`deploy_policy.py::eval`)：
+- 推理前 snapshot `wrist_arm_before_infer`
+- 推理后 `wrist_arm_after_infer = model.last_arm`
+- 不一致 → `exec_n = 1`（只走 chunk[1] 一帧）+ 打 log
+- 下一帧 obs 用更新后的 last_arm 重新 pack wrist → 正常 chunk 执行
+
+**疑点 1**（action chunk 跨 phase）：确认会跨。`_safe_end_frame` 只阻 success→failure 跨界，相邻 success phase 间无限制。
+- chunk 内可能含双臂动作；wrist 槽固定为 frame_idx 处 phase 的 arm_tag
+- 暂不修。先看 last_arm 修正效果，必要时再做 chunk 截断到 phase 内
+
+**疑点 2**（VLM 发现切换要不要重新 infer）：
+- 简化版（采纳）：检测 arm 切换 → 只执行 1 帧 → 下次 infer 时 wrist 已正确，等价于"切换瞬间紧急 1-step 闭环"
+- 完整版（成本翻倍）：arm 切换帧重新跑一次完整 cascade+flow — 暂不做
+
+### 1.7 待办
+
+- [x] 客户端 cascade 解析 + last_arm 切换
+- [x] arm-switch 紧急 1 步 exec
+- [x] 视频 overlay 显示 `wrist=left/right`（反映 last_arm 实时值）
+- [ ] 等 state-noise ckpt + 跑 eval 验证
 
 ---
 
@@ -194,11 +229,142 @@ class LAP:
 2. 推理时检测该 marker 触发 stage 重生
 3. 训练时**混合 plan-prompt 和 plan-target**：保留现在的 p_plan=0.15 设置，让模型既能 prompt 时使用 plan，又能生成 plan
 
-### 2.5 待办
+### 2.5 C1 / C2 详细分析（2026-05-12 讨论）
 
-- [ ] 短期方案 1：实现 Plan-cache（episode 内复用）
-- [ ] 短期方案 2：实现 K=16 stage 重生策略
-- [ ] 长期方案：dataloader 加 `[stage_done]` 标注 + 推理触发器
+#### C1 缺陷已识别
+
+> "VLM 不会看到 action 的注意力，实际上没有任何信号在提示模型要学输出 `[stage_done]`"
+
+确认。`stop_action_to_vlm_grad=True` 时 VLM expert 看不到 action 的反向梯度，所以**用 action chunk 是否完成 stage 当 supervision 信号** 不可行。
+
+**C1 修正**：信号改成 **frame-level，纯图像驱动**。Phase 的最后 K=1-2 帧打 `[stage_done]` 标签 → VLM 学"看到这种图像→ emit `[stage_done]`"。但已被 C2 覆盖，**不再单独推进 C1**。
+
+#### C2 完整方案（采纳为长期路径）
+
+**核心**：模型在 cascade 推理时自动决定何时切 stage —— 看到上一个 stage 文本 + 当前图像 → 二选一：继续 emit action，或 emit 新 stage。
+
+##### C2.1 训练数据改造
+
+dataloader 给每个采样帧生成两种类型之一的 cascade prefix+target：
+
+**类型 A（mid-phase 帧，约 80%）**：
+```
+prefix: [BOS] task_prompt [plan] <plan> [stage] <current_stage>
+target: [action] <action_lang>
+```
+
+**类型 B（phase 边界帧，约 20%）**：
+```
+prefix: [BOS] task_prompt [plan] <plan> [stage] <prev_stage>
+target: <stage_completion_reasoning> [stage] <new_stage> [action] <new_action_lang>
+```
+
+`<stage_completion_reasoning>` 是新加的字段（**用户提议**，下面 2.5.4 详述）。
+
+##### C2.2 推理时累积 prefix
+
+每 emit 一个 stage，prefix 追加该 stage。N 个 phase 后 prefix 含：
+```
+[plan] <plan> [stage] <p1_stage> <p1_done_reasoning>
+            [stage] <p2_stage> <p2_done_reasoning>
+            ...
+            [stage] <pN_stage> [action] <action>
+```
+
+**Train-test gap**：训练里 prefix 最多 2 个 stage（一前一后），推理时 prefix 含全部历史 stage。
+
+用户决策：**先保留 full prefix，让 attention 自己学**（期望图像 cross-attn 总是 ground 在最新 stage 上）。**超过 token budget (320) 时再上滑动窗口**。
+
+不做 attention mask / 物理删除（设计太繁琐）。
+
+##### C2.3 LLM 训练 prefix 问题（你的提问）
+
+> "LLM 训练的时候只会把之前回归的所有内容作为 prefix 吗？"
+
+**当前 cascade-VLA**：单 phase 一个训练样本。模型一次 forward 看到整个 ` [BOS] prompt [plan] plan_text [stage] stage_text [action] action_text [EOS]` 序列，对 AR-target span 内每位置计算 CE loss。**没有"上一个 stage"概念**。
+
+要做 C2 **必须改 dataloader** 让一个样本能包含**多个 phase 的 cascade 串联**（至少 2 个）。当前数据格式不支持。
+
+#### 2.5.4 ★ stage_completion_reasoning（用户提议）
+
+**用户原话**：
+> "在每次新的 stage 时要求 CE: `<stage>xxx<stage>Since the blue block has been stacked onto xxx, xxx` 即多了一个 `<stage 完成时_reasoning>` 部分是不是合理的，虽然增加了 infer 负担"
+
+**判断：非常合理**。理由：
+
+1. **训练数据已有"现在时" reasoning**（用户引用的 `subgoal_reasoning`），但**没有"完成时"的总结性 reasoning**
+2. 加完成时 reasoning 强制模型显式表达"为什么 stage k 结束 + 为什么 stage k+1 开始" → 让 VLM 学会把视觉变化 → 文本表达 → 触发 stage 切
+3. 类比 CoT 训练：先 reasoning 再决策 vs 直接决策 — reasoning 通常更鲁棒
+4. cascade 文本结构变成：
+
+```
+[stage] <stage_k 进行中 reasoning>
+       <stage_k 完成时 reasoning>  ← NEW
+[stage] <stage_k+1 进行中 reasoning>
+       <stage_k+1 完成时 reasoning>
+[stage] ...
+```
+
+##### 2.5.4.1 数据准备
+
+`subgoal_reasoning`（现在时）已经在每个 phase 的 metadata 里有 4 个变体。需要为每个 phase 也产出 1-4 个"完成时" reasoning。
+
+获取途径选项：
+- (a) **现在时 reasoning 反过来改写**：用 LLM 把 "we picked the purple cube because..." → "the purple cube has been picked because..."。批处理，离线一次性
+- (b) **手工模板**：从 `phase.kind + task_spec` 模板生成（类似已有的 `_PICKPLACE_REASONING_TEMPLATES`）— 增量加 `_COMPLETED_TEMPLATES`
+- (c) **混合**：arrange/stack 用模板，pick_place 用现成的
+
+**推荐 (b)**：模板可控、零外部 LLM 依赖、好维护。如：
+```python
+_COMPLETED_TEMPLATES = {
+    "lift_down": [
+        "The {color} cube has been placed at {dest}.",
+        "Now that the {color} cube is set down at {dest}, the {arm} gripper can release and retract.",
+        "{color} is in position at {dest}; that subtask is complete.",
+    ],
+    ...
+}
+```
+
+##### 2.5.4.2 训练 supervision
+
+完成时 reasoning 也算进 `[stage]` 段的 AR target — 用 `tokenized_stage_mask=True` 覆盖。模型对它做 CE。`tokenized_plan_mask` / `tokenized_ar_target_mask` 一并扩展覆盖该段。
+
+##### 2.5.4.3 推理收益
+
+- 输出含"<completed_reasoning> + 下一个 stage"显式信号 → 客户端容易解析"我现在在 stage k 还是 k+1"
+- last_arm 解析也变可靠（completed reasoning 通常会显式说"left gripper has released..."）
+- VLM 学到了"看到这种视觉状态 → 描述完成 → 触发新 stage"，鲁棒性比纯依赖 image cross-attn 更高
+
+##### 2.5.4.4 代价
+
+- 数据预处理：写 `_COMPLETED_TEMPLATES`（数据集已有 `_PICKPLACE_REASONING_TEMPLATES` 蓝本，工作量低）
+- 训练 token 长度：每 phase 多 ~20-40 tokens（completed reasoning），单次推理 cascade 长度 +20-40 tokens
+- 推理延迟：AR 多生成 20-40 tokens ≈ +200ms per phase boundary
+
+#### 2.5.5 Plan-cache 短期方案（**采纳为短期路径**）
+
+不重训。客户端做：
+1. Episode 首帧 infer → server AR 生成完整 cascade
+2. 客户端从 `result["reasoning_text"]` 用 `[plan]/[stage]` 分隔提取 plan 字段，缓存在 `self.cached_plan`
+3. 后续 infer：把 plan 作为 obs 字段送回 server，让 tokenizer 走 `plan_position="prompt"` 路径（训练里 85% full-cascade 帧就是这种格式）
+4. server AR 只重新生成 stage + action（仍然每次重生）
+5. `reset_obsrvationwindows` 清掉 cached_plan
+
+实施位置：
+- 客户端：`lap_model.py` 加 `self.cached_plan` + 解析
+- 客户端：`update_observation_window` 把 cached_plan + plan_position 加到 obs
+- server：不改（tokenizer 路径已支持）
+
+### 2.6 待办
+
+- [x] 短期：Plan-cache 设计已敲定（待实现）
+- [ ] 短期：实现 client-side Plan-cache
+- [ ] 长期：dataloader 改造支持 2-phase cascade 串联（C2.1）
+- [ ] 长期：写 `_COMPLETED_TEMPLATES` 数据预处理（2.5.4.1）
+- [ ] 长期：tokenizer 扩展支持 stage_completion_reasoning（2.5.4.2）
+- [ ] 长期：Stage 1 + Stage 2 用 C2 重训
+- [ ] 长期：监控 token budget，超出时上 sliding window
 
 ---
 
@@ -347,11 +513,60 @@ outputs["policy_timing"] = {"ar_ms": ar_ms, "flow_ms": flow_ms, "total_ms": ar_m
 
 ---
 
+## 6. Wandb visibility 问题
+
+**为什么这次训练 wandb 看不到？**
+
+第一次启动 `lap_robotwin_run_qpos_noise1` 卡在 `wandb: Network error (ConnectTimeout), entering retry loop` 死循环（20 min 没进 step 0）。
+pod cgroup 内出不去 `api.wandb.ai`。第二次启动加了 `WANDB_MODE=offline` 让 wandb 写本地。
+
+**当前 offline run** 在 pod：
+```
+/data/zhaoqc/RoboTwin/policy/lap/wandb/offline-run-20260512_191808-1zcjankp/
+└── run-1zcjankp.wandb  (7 MB+, 持续增长)
+```
+
+**上传方法**：
+```bash
+# 需要 wandb.ai 可达：
+kubectl -n zhaoqc exec ... -- bash -lc '
+  cd /data/zhaoqc/RoboTwin/policy/lap
+  source .venv/bin/activate
+  wandb sync wandb/latest-run
+'
+```
+
+2026-05-12 尝试一次 sync 仍然 ConnectTimeout — 当前 pod 网络无法访问 wandb.ai。
+**等训练完后再试**，或者在网络复活时跑。
+
+**实时看 metrics**（不依赖 wandb）：
+```bash
+kubectl -n zhaoqc exec ... -- bash -lc \
+  'grep -E "Step .* \\(train\\):" /data/zhaoqc/RoboTwin/policy/lap/logs/robotwin_run_qpos_noise1.log | tail'
+```
+
+---
+
 ## 总览 todo（按优先级）
 
-1. ✅ A: state-noise σ=0.02 重训（已启动 — `lap_robotwin_run_qpos_noise1` PID 175058）
-2. ❌ A1.b last_arm 客户端解析（问题 1） — 短期高优先级修复
-3. ❌ Plan-cache + K-step stage 重生（问题 2 短期方案） — 等 A 出 ckpt 一起测
-4. ❌ 视频 overlay 多行排版（问题 4） — 立即做
-5. ❌ 推理 timing profiling（问题 5） — 立即做
-6. 🔬 Stage 3 联合训练 / cascade corruption（问题 3） — 暂缓，等其他 fix 结果
+### 立即（不重训）
+
+1. ✅ A: state-noise σ=0.02 重训（运行中 — `lap_robotwin_run_qpos_noise1` PID 180900, WANDB_MODE=offline）
+2. ✅ A1.b last_arm 客户端解析 + arm-switch 1 步 exec
+3. ❌ Plan-cache 客户端实现（短期方案，§2.5.5）
+4. ✅ 视频 overlay 多行排版
+5. ✅ 推理 timing profiling
+
+### A 训练完后
+
+6. 跑 sim eval（带 last_arm + plan_cache）看 success rate
+7. 视频 + profiling 数据 → 决定是否继续推进 C2
+
+### 长期（要重训 Stage 1）
+
+8. 🎯 C2 + stage_completion_reasoning 全面改造（§2.5.4）
+9. Token budget 超出时上 sliding window
+
+### 暂缓
+
+10. 🔬 Stage 3 联合训练 / cascade corruption（teacher-forcing gap，§3）

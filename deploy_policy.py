@@ -97,6 +97,13 @@ def eval(TASK_ENV, model, observation):
     # video overlay so the user can see exactly which frame triggered the
     # cascade emission for the chunk that follows.
     infer_step = int(getattr(TASK_ENV, "take_action_cnt", 0))
+    # Snapshot which arm we packed into the wrist slot RIGHT NOW (i.e. the
+    # one used to condition the inference we're about to fire). Compare
+    # against the arm the cascade output asks for after the infer returns;
+    # if they differ we downgrade to a single-step exec to give the next
+    # tick a chance to re-pack the obs with the correct wrist (A1.b
+    # "emergency 1-step" — see stage2_design_discussions_zh.md §1).
+    wrist_arm_before_infer = getattr(model, "last_arm", None)
     # Training-data invariant (RoboTwin demo_clean): the first action of the
     # chunk equals the *current* qpos — i.e. ``actions[0] == state``. The sim's
     # ``take_action`` TOPP-interpolates from current_qpos → target_qpos, so
@@ -109,7 +116,27 @@ def eval(TASK_ENV, model, observation):
         actions = chunk[1:model.pi0_step + 1]   # drop chunk[0] (=current state)
     else:
         actions = chunk[1:] if len(chunk) > 1 else chunk
-    exec_n = min(model.exec_horizon, len(actions))
+
+    # If the cascade text just selected a different arm than the wrist
+    # image we conditioned on, the action chunk was sampled under stale
+    # visual context. Execute only one step so the next inference can
+    # re-pack the obs with the now-correct wrist before committing to a
+    # full chunk. ``model.last_arm`` has already been updated by
+    # ``get_action`` → ``_parse_arm_from_cascade``.
+    wrist_arm_after_infer = getattr(model, "last_arm", None)
+    arm_switched = (
+        wrist_arm_before_infer is not None
+        and wrist_arm_after_infer is not None
+        and wrist_arm_after_infer != wrist_arm_before_infer
+    )
+    if arm_switched:
+        print(
+            f"[LAP] arm switch detected: wrist={wrist_arm_before_infer} → "
+            f"{wrist_arm_after_infer}. Executing 1 step then re-querying."
+        )
+        exec_n = min(1, len(actions))
+    else:
+        exec_n = min(model.exec_horizon, len(actions))
 
     # Push a fresh overlay payload onto the env so the rawvideo writer can
     # annotate each frame ffmpeg ingests. The env safely no-ops if it lacks

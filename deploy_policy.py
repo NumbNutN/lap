@@ -95,7 +95,18 @@ def eval(TASK_ENV, model, observation):
     # video overlay so the user can see exactly which frame triggered the
     # cascade emission for the chunk that follows.
     infer_step = int(getattr(TASK_ENV, "take_action_cnt", 0))
-    actions = model.get_action()[:model.pi0_step]
+    # Training-data invariant (RoboTwin demo_clean): the first action of the
+    # chunk equals the *current* qpos — i.e. ``actions[0] == state``. The sim's
+    # ``take_action`` TOPP-interpolates from current_qpos → target_qpos, so
+    # executing ``actions[0]`` is a no-op (the robot is already there). For
+    # exec_horizon=1 this means we'd never move; for larger horizons it
+    # wastes one step per chunk. Strip ``actions[0]`` so every executed
+    # action is a *future* waypoint that actually moves the arm.
+    chunk = model.get_action()
+    if len(chunk) >= model.pi0_step + 1:
+        actions = chunk[1:model.pi0_step + 1]   # drop chunk[0] (=current state)
+    else:
+        actions = chunk[1:] if len(chunk) > 1 else chunk
     exec_n = min(model.exec_horizon, len(actions))
 
     # Push a fresh overlay payload onto the env so the rawvideo writer can

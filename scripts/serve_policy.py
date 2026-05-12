@@ -41,11 +41,23 @@ class Checkpoint:
     config: str
     # Checkpoint directory (e.g., "checkpoints/pi0_aloha_sim/exp/10000").
     dir: str
-    # ``flow``  → action expert flow sampling, returns ``actions`` only.
-    # ``ar``    → AR sampling of cascade tokens, returns decoded text.
-    # ``dual``  → run BOTH per inference; response carries ``actions`` + ``reasoning_text``.
-    #             Used for sim eval so video overlay can show cascade output.
-    type: Literal["flow", "ar", "dual"] = "flow"
+    # ``flow``     → action expert flow sampling, returns ``actions`` only.
+    #                 NOTE: this path does NOT generate the cascade context.
+    #                 ``sample_actions`` reads ``tokenized_prompt`` verbatim,
+    #                 so prefix == bare instruction. The action expert sees a
+    #                 different prefix than during training (no cascade). This
+    #                 is the source of the train/test gap; prefer ``cascade``.
+    # ``ar``       → AR sampling of cascade tokens, returns decoded text only.
+    # ``cascade``  → full cascade-VLA pipeline per request:
+    #                AR generate cascade → append to prefix → flow sample
+    #                actions conditioned on the *generated* cascade.
+    #                Returns ``actions`` + ``reasoning_text``. Costs ~2× a
+    #                pure-flow request.
+    # ``dual``     → DEPRECATED alias for ``cascade``. The original
+    #                ``DualModePolicy`` ran AR and flow *independently* (flow
+    #                ignored the AR output), which silently kept the train/test
+    #                gap; this alias now routes to the cascade pipeline.
+    type: Literal["flow", "ar", "cascade", "dual"] = "flow"
 
 
 @dataclasses.dataclass
@@ -73,10 +85,10 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     EnvMode.LAP_ROBOTWIN: Checkpoint(
         config="lap_robotwin_finetune",
         dir="checkpoints/lap_robotwin_finetune/lap_robotwin_run0/30000",
-        # Dual mode: server emits actions (flow) + cascade reasoning_text (AR)
-        # per request, so sim eval can overlay the [plan]/[stage]/[action] text
-        # on rollout videos. ~2× inference latency.
-        type="dual",
+        # Cascade pipeline: AR generate cascade → flow sample actions
+        # conditioned on the *generated* cascade. Closes the train/test gap
+        # that plain ``flow`` mode leaves open.
+        type="cascade",
     ),
     EnvMode.PI05_DROID: Checkpoint(config="pi05_droid", dir="gs://openpi-assets/checkpoints/pi05_droid", type="flow"),
 }
@@ -90,9 +102,24 @@ def create_policy(args: Args) -> _policy.Policy:
         raise ValueError(f"Unsupported environment mode: {args.env}")
 
     config = _config.get_config(checkpoint.config)
-    # Always disable stop_action_to_vlm_grad for inference — this flag is only
-    # meaningful during training.
-    config = dataclasses.replace(config, model=dataclasses.replace(config.model, stop_action_to_vlm_grad=False))
+    # Disable BOTH stop_grad knobs for inference — they only matter for the
+    # training-time gradient flow, and `stop_action_to_vlm_grad=True` triggers
+    # a shape-mismatch bug inside `sample_tokens` (the `cross_to_expert0` mask
+    # is sized to the un-padded prefix but the KV cache is padded for
+    # max_decoding_steps; `probs * cross_to_expert0` then fails to broadcast).
+    # Note: ``LAPConfig.__post_init__`` derives ``stop_action_to_vlm_grad``
+    # from ``stop_grad_mode`` *every* time the dataclass is re-instantiated
+    # (which ``dataclasses.replace`` does). So we must override both, in this
+    # order — set ``stop_grad_mode="off"`` first, otherwise the post-init
+    # will flip ``stop_action_to_vlm_grad`` back to True.
+    config = dataclasses.replace(
+        config,
+        model=dataclasses.replace(
+            config.model,
+            stop_grad_mode="off",
+            stop_action_to_vlm_grad=False,
+        ),
+    )
 
     if checkpoint.type == "ar":
         return _policy_config.create_trained_policy_ar(
@@ -102,16 +129,17 @@ def create_policy(args: Args) -> _policy.Policy:
         return _policy_config.create_trained_policy(
             config, checkpoint.dir, default_prompt=args.default_prompt
         )
-    if checkpoint.type == "dual":
-        # Build the flow policy once, then wrap its underlying model in an
-        # ARPolicy for the cascade-text path. We deliberately reuse the
-        # same loaded params so this costs no extra GPU memory.
-        from lap.policies.policy_adapter import ARPolicy, DualModePolicy
-        flow_policy = _policy_config.create_trained_policy(
+    if checkpoint.type in ("cascade", "dual"):
+        # ``dual`` is kept as a back-compat alias; both route to the cascade
+        # pipeline (the previous ``DualModePolicy`` was incorrect — it ran AR
+        # and flow independently and never fed the cascade into the flow
+        # prefix). The CascadePipelinePolicy reuses the same loaded params as
+        # the flow policy, so this costs no extra GPU memory.
+        from lap.policies.policy_adapter import CascadePipelinePolicy
+        base = _policy_config.create_trained_policy(
             config, checkpoint.dir, default_prompt=args.default_prompt
         )
-        ar_policy = ARPolicy(flow_policy)
-        return DualModePolicy(flow=flow_policy, ar=ar_policy)
+        return CascadePipelinePolicy(base)
     raise NotImplementedError
 
 

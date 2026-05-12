@@ -66,3 +66,11 @@ verbose: false
 # α = 1.0 → disabled (use raw action). 0.5 ≈ moderate. < 0.3 lags noticeably.
 # Reset at every episode start (model.reset_obsrvationwindows).
 action_smooth_alpha: 0.5
+
+# Plan-cache (stage2_design_discussions_zh.md §2.5.5). When True the client
+# extracts the ``[plan]`` segment from the FIRST cascade response of each
+# episode and forwards it on subsequent inferences as
+# ``obs.plan + obs.plan_position="prompt"`` so the model only AR-generates
+# stage + action (plan stays static per episode, matching training).
+# Reset on every reset_obsrvationwindows.
+cache_plan: true

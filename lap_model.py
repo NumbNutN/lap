@@ -54,6 +54,17 @@ class LAP:
         # α=1.0 → disabled (raw actions); 0.5 ≈ moderate smoothing; <0.3
         # is very heavy and will lag the policy noticeably.
         action_smooth_alpha: float = 1.0,
+        # Plan-cache (stage2_design_discussions_zh.md §2.5.5). When True,
+        # the first inference of each episode lets the server AR-generate
+        # the full ``[plan][stage][action]`` cascade. The client extracts
+        # the ``[plan]`` segment from ``reasoning_text`` and on every
+        # subsequent inference sends ``plan`` + ``plan_position="prompt"``
+        # in the obs dict so the tokenizer routes through the
+        # plan-in-prompt path (training-distribution Context 2). AR then
+        # only regenerates ``[stage]`` + ``[action]``. Reduces per-infer
+        # cascade variance and matches the training observation that plan
+        # is episode-static.
+        cache_plan: bool = True,
     ):
         self.train_config_name = train_config_name
         self.model_name = model_name
@@ -82,6 +93,10 @@ class LAP:
         # ``last_wrist`` mirrors it for the video overlay.
         self.last_arm: str = "right"
         self.last_wrist: str = self.last_arm
+
+        # Plan-cache state. Cleared on ``reset_obsrvationwindows``.
+        self.cache_plan = bool(cache_plan)
+        self.cached_plan: str = ""
 
         # Action-smoothing state. Cleared on ``reset_obsrvationwindows``.
         self.action_smooth_alpha = float(action_smooth_alpha)
@@ -179,10 +194,15 @@ class LAP:
 
         # Match RoboTwinTaskDataset emit format (HWC uint8 + dict-of-cams) and
         # carry the routing flags ``TokenizePromptAndReasoning`` reads
-        # unconditionally (``is_vqa_sample`` / ``is_prediction_sample``). For
-        # inference we set both to False (= regular task sample, no auxiliary
-        # heads). language_actions / langact / plan are omitted so the
-        # tokenizer goes through the legacy "prompt only" Context 1 path.
+        # unconditionally (``is_vqa_sample`` / ``is_prediction_sample``).
+        # When ``cache_plan`` is on AND we've extracted a plan from a prior
+        # cascade response (this episode), include ``plan`` + ``plan_position
+        # ="prompt"`` so the tokenizer routes through the plan-in-prompt
+        # branch (training Context 2). AR will then only need to generate
+        # ``[stage]`` + ``[action]``. On the first infer of each episode
+        # ``cached_plan`` is empty → fall through to the legacy "prompt
+        # only" path (Context 1) and let AR produce the full cascade,
+        # which ``get_action`` then mines for the plan to cache.
         self.observation_window = {
             "image": {
                 BASE_KEY: head.astype(np.uint8),
@@ -197,6 +217,12 @@ class LAP:
             "is_vqa_sample": False,
             "is_prediction_sample": False,
         }
+        if self.cache_plan and self.cached_plan:
+            # Server's TokenizePromptAndReasoning will encode
+            # ``[plan] <cached_plan>`` into the prompt span (NOT the AR
+            # target). AR then only needs to emit ``[stage]`` + ``[action]``.
+            self.observation_window["plan"] = self.cached_plan
+            self.observation_window["plan_position"] = "prompt"
 
     def get_action(self):
         assert self.observation_window is not None, (
@@ -220,6 +246,19 @@ class LAP:
                 self.last_arm = self._parse_arm_from_cascade(
                     self.last_reasoning_text, self.last_arm
                 )
+                # Plan-cache: on the first infer of each episode the cascade
+                # response contains a freshly-generated ``[plan]<text>``
+                # segment. Extract it, store it, and subsequent inferences
+                # will route through the plan-in-prompt path (avoiding the
+                # plan-drifts-each-tick problem we observed in early eval
+                # videos). The plan span is everything between ``[plan]``
+                # and ``[stage]`` (or end-of-text if no stage marker yet).
+                if self.cache_plan and not self.cached_plan and self.last_reasoning_text:
+                    plan_text = self._extract_plan_segment(self.last_reasoning_text)
+                    if plan_text:
+                        self.cached_plan = plan_text
+                        print(f"[LAP] plan cached ({len(plan_text)} chars): "
+                              f"{plan_text[:100]!r}...")
                 # Per-inference timing breakdown — written by the server-side
                 # CascadePipelinePolicy. Lets us see how much of each infer
                 # is LLM (AR) vs flow-matching vs round-trip overhead.
@@ -273,7 +312,42 @@ class LAP:
         # initiate motion with the right gripper.
         self.last_arm = "right"
         self.last_wrist = self.last_arm
+        # Drop the cached plan so the first infer of the next episode
+        # regenerates one (the new episode's plan can differ — e.g. the
+        # scene snapshot rolled a different cube placement, so the
+        # task-prompt's `Arrange the blocks into an L shape.` resolves to
+        # a different multi-step plan).
+        self.cached_plan = ""
         print("[LAP] reset observation window + instruction")
+
+    @staticmethod
+    def _extract_plan_segment(text: str) -> str:
+        """Return the text between ``[plan]`` and the next segment marker.
+
+        The server-side ``CascadePipelinePolicy`` produces a single decoded
+        string like ``"[plan] <plan_text> [stage] <reasoning> [action]
+        <langact>"``. Plan-cache (see ``stage2_design_discussions_zh.md
+        §2.5.5``) wants the ``<plan_text>`` substring without the
+        ``[plan]`` marker so we can pass it back as the ``plan`` field of
+        the next obs dict (where ``TokenizePromptAndReasoning`` will
+        re-prepend the marker itself).
+
+        Returns the empty string if no ``[plan]`` marker is found.
+        """
+        if not text:
+            return ""
+        marker = "[plan]"
+        i = text.find(marker)
+        if i == -1:
+            return ""
+        start = i + len(marker)
+        # End at the next segment marker (whichever comes first).
+        end = len(text)
+        for nxt in ("[stage]", "[action]"):
+            j = text.find(nxt, start)
+            if j != -1 and j < end:
+                end = j
+        return text[start:end].strip()
 
     @staticmethod
     def _parse_arm_from_cascade(text: str, prev: str) -> str:

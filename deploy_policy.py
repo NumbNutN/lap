@@ -50,6 +50,9 @@ def get_model(usr_args):
     infer_max_retries = usr_args.get("infer_max_retries", 3)
     infer_retry_backoff_s = usr_args.get("infer_retry_backoff_s", 1.0)
     action_smooth_alpha = float(usr_args.get("action_smooth_alpha", 1.0))
+    cache_plan = usr_args.get("cache_plan", True)
+    if isinstance(cache_plan, str):
+        cache_plan = cache_plan.strip().lower() in ("true", "1", "yes")
 
     model = LAP(
         train_config_name=train_config_name,
@@ -61,6 +64,7 @@ def get_model(usr_args):
         infer_max_retries=infer_max_retries,
         infer_retry_backoff_s=infer_retry_backoff_s,
         action_smooth_alpha=action_smooth_alpha,
+        cache_plan=cache_plan,
     )
     model.exec_horizon = min(exec_horizon, pi0_step)
 

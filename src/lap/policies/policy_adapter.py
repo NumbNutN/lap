@@ -148,7 +148,10 @@ class CascadePipelinePolicy:
         # Stage 1: AR-sample the cascade tokens conditioned on the bare prefix.
         observation_ar = CoTObservation.from_dict(inputs)
         self._base._rng, ar_rng = jax.random.split(self._base._rng)  # noqa: SLF001
+        ar_start = time.monotonic()
         ar_tokens = self._sample_tokens(ar_rng, observation_ar)  # (1, max_decode)
+        ar_tokens.block_until_ready() if hasattr(ar_tokens, "block_until_ready") else None
+        ar_ms = (time.monotonic() - ar_start) * 1000.0
         ar_arr = np.asarray(ar_tokens[0])
 
         # Find the actual length of the generated cascade. ``sample_tokens``
@@ -210,9 +213,10 @@ class CascadePipelinePolicy:
                 noise_arr = noise_arr[None, ...]
             sample_kwargs["noise"] = noise_arr
 
-        start_time = time.monotonic()
+        flow_start = time.monotonic()
         actions = self._sample_actions(flow_rng, observation_flow, **sample_kwargs)
-        model_time = time.monotonic() - start_time
+        actions.block_until_ready() if hasattr(actions, "block_until_ready") else None
+        flow_ms = (time.monotonic() - flow_start) * 1000.0
 
         # Stage 4: output transform — match Policy.infer's contract so the
         # client/server packing path stays identical.
@@ -223,5 +227,10 @@ class CascadePipelinePolicy:
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
         outputs = self._base._output_transform(outputs)  # noqa: SLF001
         outputs["reasoning_text"] = reasoning_text
-        outputs["policy_timing"] = {"infer_ms": model_time * 1000}
+        outputs["policy_timing"] = {
+            "ar_ms": ar_ms,
+            "flow_ms": flow_ms,
+            "infer_ms": ar_ms + flow_ms,
+            "cascade_tokens": int(gen_len),
+        }
         return outputs

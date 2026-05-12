@@ -72,9 +72,16 @@ class LAP:
         # field alongside ``actions``. Used by the eval driver to set the
         # rollout-video overlay text per inference.
         self.last_reasoning_text: str = ""
-        # Tag of which wrist image the client packed into ``left_wrist_0_rgb``.
-        # Stays "left" until A1.b stickiness is implemented.
-        self.last_wrist: str = "left"
+
+        # A1.b last_arm stickiness state. ``last_arm`` says which physical
+        # wrist camera (``left`` or ``right``) is packed into the model's
+        # single wrist slot for *this* inference. Updated by
+        # ``_parse_arm_from_cascade`` after each successful infer. Default
+        # "right" because pick_place / arrange tasks usually start by acting
+        # with the right gripper (matches the bias in training data).
+        # ``last_wrist`` mirrors it for the video overlay.
+        self.last_arm: str = "right"
+        self.last_wrist: str = self.last_arm
 
         # Action-smoothing state. Cleared on ``reset_obsrvationwindows``.
         self.action_smooth_alpha = float(action_smooth_alpha)
@@ -150,7 +157,16 @@ class LAP:
                 return arr
 
         head = _ensure_224(head)
-        wrist = _ensure_224(left)   # always feed left wrist for now (A1.b stickiness deferred)
+        # A1.b "last_arm stickiness" inference protocol: the wrist slot must
+        # match what the training dataset packed (which was
+        # ``left_camera if phase.arm_tag=="left" else right_camera``). The
+        # client maintains ``self.last_arm`` and parses each cascade response
+        # for the arm mention (see ``get_action``). This is the short-term
+        # fix for the train/test wrist mismatch documented in
+        # ``stage2_design_discussions_zh.md §1``.
+        wrist_src = right if self.last_arm == "right" else left
+        wrist = _ensure_224(wrist_src)
+        self.last_wrist = self.last_arm
 
         # State is 14-d for bimanual RoboTwin; pad/truncate defensively.
         state_arr = np.asarray(state, dtype=np.float32).reshape(-1)
@@ -198,6 +214,35 @@ class LAP:
                 self.last_reasoning_text = str(
                     result.get("reasoning_text", "") or ""
                 ).strip()
+                # Update which wrist camera goes into the next inference's
+                # wrist slot based on the cascade text the model just emitted
+                # (A1.b stickiness — see ``stage2_design_discussions_zh.md §1``).
+                self.last_arm = self._parse_arm_from_cascade(
+                    self.last_reasoning_text, self.last_arm
+                )
+                # Per-inference timing breakdown — written by the server-side
+                # CascadePipelinePolicy. Lets us see how much of each infer
+                # is LLM (AR) vs flow-matching vs round-trip overhead.
+                pt = result.get("policy_timing", {}) or {}
+                st = result.get("server_timing", {}) or {}
+                ar_ms = pt.get("ar_ms")
+                flow_ms = pt.get("flow_ms")
+                cascade_tokens = pt.get("cascade_tokens")
+                server_ms = st.get("infer_ms")
+                wire_ms = max(0.0, elapsed * 1000.0 - (server_ms or 0.0))
+                parts = [f"client_total={elapsed*1000:.0f}ms"]
+                if server_ms is not None:
+                    parts.append(f"server={server_ms:.0f}ms")
+                if ar_ms is not None and flow_ms is not None:
+                    total_model = ar_ms + flow_ms
+                    ar_share = (ar_ms / total_model * 100.0) if total_model > 0 else 0.0
+                    parts.append(
+                        f"AR={ar_ms:.0f}ms({ar_share:.0f}%) flow={flow_ms:.0f}ms({100-ar_share:.0f}%)"
+                    )
+                if cascade_tokens is not None:
+                    parts.append(f"tokens={cascade_tokens}")
+                parts.append(f"net_overhead={wire_ms:.0f}ms")
+                print(f"[LAP-perf #{self._infer_count + 1:04d}] " + "  ".join(parts))
                 self._infer_count += 1
                 if self.verbose:
                     self._log_inference(elapsed, actions)
@@ -223,7 +268,60 @@ class LAP:
         self.observation_window = None
         self._infer_count = 0
         self._smoothed_action = None
+        # Reset A1.b stickiness state on episode boundary. Default to "right"
+        # since most RoboTwin task families (pick_place, arrange_blocks)
+        # initiate motion with the right gripper.
+        self.last_arm = "right"
+        self.last_wrist = self.last_arm
         print("[LAP] reset observation window + instruction")
+
+    @staticmethod
+    def _parse_arm_from_cascade(text: str, prev: str) -> str:
+        """Heuristic: extract ``left`` / ``right`` from the cascade text.
+
+        Searches in priority order ``[action]`` → ``[stage]`` → ``[plan]``.
+        Looks for the phrases ``left gripper`` / ``right gripper`` / ``left
+        arm`` / ``right arm``. If both appear in the same segment, takes
+        whichever appears LAST (most recent action). Falls through to the
+        previous value if no signal is found.
+
+        Cascade training templates include explicit ``{arm}`` substitution
+        (see ``robotwin_dataset.py::_PICKPLACE_REASONING_TEMPLATES``) so the
+        signal should be present at training-distribution frames.
+        """
+        if not text:
+            return prev
+        lower = text.lower()
+        # Slice from the most specific section back to the broadest.
+        for marker in ("[action]", "[stage]", "[plan]"):
+            idx = lower.find(marker)
+            if idx == -1:
+                continue
+            seg = lower[idx + len(marker):]
+            # Cut at the next marker if there is one (rare but safe).
+            for nxt in ("[plan]", "[stage]", "[action]"):
+                ni = seg.find(nxt)
+                if ni != -1:
+                    seg = seg[:ni]
+            left_idx = max(
+                seg.rfind("left gripper"),
+                seg.rfind("left arm"),
+                seg.rfind("left hand"),
+            )
+            right_idx = max(
+                seg.rfind("right gripper"),
+                seg.rfind("right arm"),
+                seg.rfind("right hand"),
+            )
+            if left_idx == -1 and right_idx == -1:
+                continue
+            return "right" if right_idx > left_idx else "left"
+        # No segment markers — try whole text.
+        if "right gripper" in lower or "right arm" in lower:
+            return "right"
+        if "left gripper" in lower or "left arm" in lower:
+            return "left"
+        return prev
 
     # ----- internals -----
 

@@ -52,19 +52,42 @@ its own drift*.
 In rough order of compute cost. Plan: try the cheap one first, escalate
 only if needed.
 
-### D. Action smoothing (inference-time, no retrain)
+### D. Action smoothing (inference-time, no retrain) — TRIED, INSUFFICIENT
 
 EMA / low-pass filter on the executed action stream. Goal: reduce the
 high-frequency jumps at chunk boundaries that compound into trajectory
 drift.
 
 - Implementation: `smoothed_t = α · raw_t + (1−α) · smoothed_{t−1}`,
-  reset on episode start. Add an `action_smooth_alpha` knob in
-  `policy/lap/deploy_policy.yml` (default 0.5).
+  reset on episode start. `action_smooth_alpha` knob in
+  `policy/lap/deploy_policy.yml`.
 - Cost: a few lines in `lap_model.py` + `deploy_policy.py`. No retrain.
-- Risk: if drift is from systematic mis-prediction (not control noise),
-  smoothing won't help and may make things worse by lagging the policy.
-- **Status**: implementing now (this session).
+- **Status (2026-05-12)**: tested at α=0.5 → **0/3 step_limit, same as
+  unsmoothed**. Videos show identical "hover-near-block-but-never-grasp"
+  pattern. The smoothing changes intra-chunk trajectory shape slightly
+  but does not pull the policy back onto the training manifold once it
+  has drifted off — confirming the diagnosis that the failure is from
+  model mis-prediction on OOD states, not from high-frequency
+  controller noise.
+- **Verdict**: D alone is insufficient. The fix has to widen what the
+  *training distribution* covers, not what the inference filter smooths.
+- Side observation worth keeping: with `chunk[1:]` (no-op skip), each
+  inference produces a chunk of 7 motion waypoints, so `exec_horizon` is
+  effectively capped at 7. The overlay shows `chunk=N/7` correctly.
+
+#### Side note: cascade plan drift across inferences
+
+While inspecting rollout videos under cascade pipeline, observed that the
+generated `[plan]` text can change between inferences within one episode
+(e.g. "Place the blue block at the corner" at step 150 → "Place the
+purple block at the corner" at step 300, same scene). This is consistent
+with how cascade was trained (cascade emission is only sampled on ~20%
+of frames at phase boundaries; mid-phase had no cascade target so the
+model has no strong anchor) and is exacerbated by image observations
+changing as the arm moves. Not a bug, but a contributor to behavioral
+inconsistency. If we want stable plan conditioning at inference we'd
+need to cache the plan per episode (or per phase, if we can detect
+boundaries) instead of regenerating every call.
 
 ### A. State-noise data augmentation (cheapest retrain)
 

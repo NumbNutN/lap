@@ -358,6 +358,13 @@ class RoboTwinDataConfig(BaseDataConfigFactory):
     # * "endpose" — Cartesian (run0 setting, preserved for back-compat).
     state_kind: str = "qpos"
 
+    # Mitigation A from stage2_sim_eval_diagnosis.md: σ (rad) of Gaussian
+    # noise added to the proprioceptive ``state`` during training. Widens
+    # the training manifold so the policy can recover from the small
+    # joint-servo / TOPP-planning drift that happens at sim eval time.
+    # 0.0 → disabled. ~0.02 rad (1°) is the recommended starting point.
+    state_noise_std: float = 0.0
+
     # Disable RLDS/LeRobot path resolution.
     rlds_data_dir: str = ""
 
@@ -1200,6 +1207,61 @@ _CONFIGS = [
         num_train_steps=30_001,
         batch_size=80,                  # ← 16 / GPU × 5 GPUs (was 96 = 16 × 6)
         fsdp_devices=5,                 # ← full FSDP across the 5-GPU pod
+        ema_schedule_choice=EmaScheduleChoice(kind="disabled"),
+    ),
+    # =========================================================================
+    # Stage 2 v2: qpos-aligned + state-noise augmentation (mitigation A from
+    # stage2_sim_eval_diagnosis.md). Identical to lap_robotwin_finetune_qpos
+    # except for ``state_noise_std=0.02`` rad (~1°). Goal: widen the training
+    # state manifold so the policy can recover from the small TOPP / joint
+    # servo drift that happens at sim eval — addresses the 0/N step_limit
+    # failure mode that pure qpos alignment + cascade pipeline + EMA
+    # smoothing all left intact.
+    # =========================================================================
+    TrainConfig(
+        name="lap_robotwin_finetune_qpos_noise",
+        model=lap_config.LAPConfig(
+            action_dim=14,
+            action_horizon=8,
+            max_token_len=320,
+            pi05=True,
+            discrete_state_input=False,
+            enable_action_training=True,
+            enable_langact_training=True,
+            enable_prediction_training=False,
+            enable_vqa_training=False,
+            action_attention_mode="lap_original",
+            stop_grad_mode="full",
+            cascade_unmask_plan=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            prompt_format="lap",
+            language_loss_weight=0.5,
+            enable_image_augmentation=True,
+        ),
+        data=RoboTwinDataConfig(
+            data_root="/data/.cache/RoboTwin",
+            p_plan=0.15,
+            p_full_reasoning=0.20,
+            state_kind="qpos",
+            state_noise_std=0.02,      # ← σ = 0.02 rad ≈ 1° (mitigation A)
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=2e-5,
+            decay_steps=30_000,
+            decay_lr=2e-6,
+        ),
+        weight_loader=weight_loaders.WeightLoaderChoice(
+            kind="checkpoint",
+            params_path="checkpoints/lap_bridge_pretrain/lap_bridge_pretrain_run1/50000/params",
+        ),
+        allow_partial_weights=True,
+        save_interval=2_000,
+        keep_period=10_000,
+        num_train_steps=30_001,
+        batch_size=80,
+        fsdp_devices=5,
         ema_schedule_choice=EmaScheduleChoice(kind="disabled"),
     ),
     *upstream_config._CONFIGS,  # noqa: SLF001

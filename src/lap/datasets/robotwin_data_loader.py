@@ -137,6 +137,7 @@ def create_robotwin_data_loader(
         max_episodes_per_dataset=getattr(cfg, "max_episodes_per_dataset", None),
         seed=seed,
         state_kind=getattr(cfg, "state_kind", "qpos"),
+        state_noise_std=getattr(cfg, "state_noise_std", 0.0),
     )
     logger.info(
         "RoboTwinMixedDataset ready: tasks=%s",

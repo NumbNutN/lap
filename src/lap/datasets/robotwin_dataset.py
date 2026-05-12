@@ -331,6 +331,15 @@ class RoboTwinTaskDataset:
     # sim eval driver (``policy/lap/deploy_policy.py::encode_obs``); use
     # "endpose" only to reproduce the v0/run0 (mismatched) ckpt.
     state_kind: str = "qpos"
+    # Mitigation A from stage2_sim_eval_diagnosis.md: inject Gaussian noise
+    # into the proprioceptive ``state`` vector during training so the policy
+    # learns ``f(state + ε) ≈ action``. This widens the training manifold to
+    # cover the near-trajectory states that sim eval actually visits (due to
+    # TOPP planning + joint servo error). Only affects ``state``; actions
+    # remain the clean GT chunk. Recommend σ ≈ 0.02 rad (~1°) — small enough
+    # that the chunk is still a valid trajectory from the perturbed state.
+    # Set to 0.0 to disable (= back to the clean qpos run).
+    state_noise_std: float = 0.0
 
     def __post_init__(self):
         self.task_dir = pathlib.Path(self.task_dir)
@@ -351,6 +360,12 @@ class RoboTwinTaskDataset:
             self._episode_ids = self._episode_ids[: self.max_episodes]
         self._reader = _RoboTwinHDF5Reader(image_size=self.image_size)
         self._rng = random.Random(self.seed)
+        # Separate numpy RNG for state-noise sampling so it doesn't interfere
+        # with the python ``random.Random`` used for episode/frame ordering.
+        self._state_noise_np_rng = np.random.default_rng(self.seed ^ 0xA17_9_15E1F)
+
+    def _rng_state_noise(self):
+        return self._state_noise_np_rng
 
     # ----- helpers -----
 
@@ -492,6 +507,10 @@ class RoboTwinTaskDataset:
         state = self._reader.read_state(
             self._hdf5_path(episode), frame_idx, state_kind=self.state_kind
         )
+        # State noise (mitigation A — domain randomization on proprioception).
+        if self.state_noise_std > 0.0:
+            noise = self._rng_state_noise().standard_normal(state.shape).astype(state.dtype)
+            state = state + (self.state_noise_std * noise).astype(state.dtype)
 
         # 6. Pack into the bridge-compatible per-step sample dict.
         return {
@@ -548,6 +567,8 @@ class RoboTwinMixedDataset:
     seed: int = 0
     # State space for the 14-d state vector. See RoboTwinTaskDataset.state_kind.
     state_kind: str = "qpos"
+    # See RoboTwinTaskDataset.state_noise_std (mitigation A).
+    state_noise_std: float = 0.0
 
     def __post_init__(self):
         self.data_root = pathlib.Path(self.data_root)
@@ -568,6 +589,7 @@ class RoboTwinMixedDataset:
                     max_episodes=self.max_episodes_per_dataset,
                     seed=self.seed + abs(hash(name)) % 1000,
                     state_kind=self.state_kind,
+                    state_noise_std=self.state_noise_std,
                 )
             except FileNotFoundError as e:
                 logger.warning("RoboTwin task %s init failed, skipping: %s", name, e)

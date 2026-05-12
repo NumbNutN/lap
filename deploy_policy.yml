@@ -58,3 +58,11 @@ rollout_capture:
 
 # Verbose mode: print per-inference diagnostics and save observation images
 verbose: false
+
+# Action smoothing (mitigation D — see stage2_sim_eval_diagnosis.md).
+# Low-pass filter on the executed action stream to dampen chunk-boundary
+# jumps that compound into off-trajectory drift in IL eval.
+#   smoothed_t = α · raw_t + (1 − α) · smoothed_{t−1}
+# α = 1.0 → disabled (use raw action). 0.5 ≈ moderate. < 0.3 lags noticeably.
+# Reset at every episode start (model.reset_obsrvationwindows).
+action_smooth_alpha: 0.5

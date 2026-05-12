@@ -49,6 +49,7 @@ def get_model(usr_args):
     exec_horizon = usr_args.get("exec_horizon", pi0_step)
     infer_max_retries = usr_args.get("infer_max_retries", 3)
     infer_retry_backoff_s = usr_args.get("infer_retry_backoff_s", 1.0)
+    action_smooth_alpha = float(usr_args.get("action_smooth_alpha", 1.0))
 
     model = LAP(
         train_config_name=train_config_name,
@@ -59,6 +60,7 @@ def get_model(usr_args):
         server_port=server_port,
         infer_max_retries=infer_max_retries,
         infer_retry_backoff_s=infer_retry_backoff_s,
+        action_smooth_alpha=action_smooth_alpha,
     )
     model.exec_horizon = min(exec_horizon, pi0_step)
 
@@ -115,6 +117,12 @@ def eval(TASK_ENV, model, observation):
     set_overlay = getattr(TASK_ENV, "set_video_overlay", None)
 
     for i, action in enumerate(actions[:exec_n]):
+        # Action smoothing (mitigation D from stage2_sim_eval_diagnosis.md):
+        # EMA blend with the previously-executed action to dampen
+        # chunk-boundary jumps that drive the IL policy off-trajectory.
+        # ``model.smooth_action`` is a pass-through when
+        # ``action_smooth_alpha >= 1.0``.
+        action_to_exec = model.smooth_action(action)
         if set_overlay is not None:
             set_overlay({
                 "infer_step": infer_step,
@@ -123,7 +131,7 @@ def eval(TASK_ENV, model, observation):
                 "wrist": getattr(model, "last_wrist", "left"),
                 "reasoning": getattr(model, "last_reasoning_text", "") or "",
             })
-        TASK_ENV.take_action(action)
+        TASK_ENV.take_action(action_to_exec)
         observation = TASK_ENV.get_obs()
         input_rgb_arr, input_state = encode_obs(observation)
         model.update_observation_window(input_rgb_arr, input_state)

@@ -47,6 +47,13 @@ class LAP:
         server_port: int = 8000,
         infer_max_retries: int = 3,
         infer_retry_backoff_s: float = 1.0,
+        # Action smoothing (D from stage2_sim_eval_diagnosis.md): low-pass
+        # filter applied per-executed action to dampen the chunk-boundary
+        # jumps that compound into off-trajectory drift in IL eval.
+        # ``smoothed_t = α · raw_t + (1−α) · smoothed_{t−1}``.
+        # α=1.0 → disabled (raw actions); 0.5 ≈ moderate smoothing; <0.3
+        # is very heavy and will lag the policy noticeably.
+        action_smooth_alpha: float = 1.0,
     ):
         self.train_config_name = train_config_name
         self.model_name = model_name
@@ -69,6 +76,10 @@ class LAP:
         # Stays "left" until A1.b stickiness is implemented.
         self.last_wrist: str = "left"
 
+        # Action-smoothing state. Cleared on ``reset_obsrvationwindows``.
+        self.action_smooth_alpha = float(action_smooth_alpha)
+        self._smoothed_action: np.ndarray | None = None
+
         self.server_host = server_host
         self.server_port = server_port
         self.infer_max_retries = max(1, int(infer_max_retries))
@@ -80,6 +91,21 @@ class LAP:
         )
         meta = self.policy.get_server_metadata()
         print(f"[LAP] Connected. Server metadata: {meta}")
+
+    def smooth_action(self, raw_action) -> np.ndarray:
+        """EMA-blend ``raw_action`` with the previously-smoothed one.
+
+        Returns the smoothed action to be sent to the env. Updates internal
+        state so subsequent calls chain correctly. When
+        ``action_smooth_alpha >= 1.0`` this is a pass-through (raw action).
+        """
+        raw = np.asarray(raw_action, dtype=np.float32)
+        a = self.action_smooth_alpha
+        if a >= 1.0 or self._smoothed_action is None:
+            self._smoothed_action = raw
+        else:
+            self._smoothed_action = (a * raw + (1.0 - a) * self._smoothed_action).astype(np.float32)
+        return self._smoothed_action
 
     # ----- generic eval-policy contract -----
 
@@ -196,6 +222,7 @@ class LAP:
         self.instruction = None
         self.observation_window = None
         self._infer_count = 0
+        self._smoothed_action = None
         print("[LAP] reset observation window + instruction")
 
     # ----- internals -----

@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures as futures
 import dataclasses
 import logging
+import os
 import subprocess
 import time
 from typing import Protocol
@@ -277,11 +278,28 @@ def save_state(
             # Split params that can be used for inference into a separate item.
             with at.disable_typechecking():
                 train_state, params = _split_params(state)
+            # Memory-tight pods (e.g. 82Gi cgroup) cannot host the
+            # ~33 GiB train_state spike on top of the ~50 GiB training
+            # resident set during orbax host transfer — saves crash
+            # OOMKilled mid-write. Opt-out path: drop train_state from the
+            # save items dict and write only params (~10 GiB). The resulting
+            # ckpt is fine for inference (``create_trained_policy`` only
+            # reads ``params/``) but cannot be used for ``--resume``.
+            skip_ts = os.environ.get("LAP_SKIP_TRAIN_STATE_SAVE", "0").lower() in (
+                "1", "true", "yes",
+            )
             items = {
                 "assets": save_assets,
-                "train_state": train_state,
                 "params": {"params": params},
             }
+            if skip_ts:
+                logging.info(
+                    "LAP_SKIP_TRAIN_STATE_SAVE=1 → omitting train_state from "
+                    "checkpoint save (params-only). This ckpt cannot be used "
+                    "to --resume training."
+                )
+            else:
+                items["train_state"] = train_state
             manager_to_use.save(step, items)
 
             # Wait for async operations to complete before barrier

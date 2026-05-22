@@ -109,30 +109,75 @@ class Keyframe:
 }
 ```
 
-### 3.3 ECoT 风格总结（参考但不照搬）
+### 3.3 ECoT 风格总结（已对照论文原文校对）
 
-UC Berkeley 的 Embodied-Chain-of-Thought (Zhao et al., 2024) 是我们的风格参照源。它在每帧都生成 7 层 reasoning：
+参照：Zawalski et al. _"Robotic Control via Embodied Chain-of-Thought Reasoning"_ (CoRL 2024, arXiv:2407.08693v3)。
 
-| ECoT 层级 | 内容示例 | 我们的对应 |
-|----------|---------|----------|
-| **TASK** | "Put the watermelon on the towel" | `task_instruction` (prompt) |
-| **PLAN** | 数字序列："1. Move to watermelon 2. Firmly grasp it 3. ..." | `[plan]` |
-| **SUBTASK_REASONING** | "The watermelon is the first object the robot needs to interact with. The robot is not yet close to the watermelon, so the robot needs to move closer." | `[stage]` 段的前半 |
-| **SUBTASK** | "Move to the watermelon" | `[stage]` 段的后半（融合） |
-| **MOVE_REASONING** | "The watermelon is behind the robot, so it needs to move backward." | `[think]`（可选） |
-| **MOVE** | "Move backward" | `[action]`（我们偏长，但不绝对） |
-| **GRIPPER POS / VISIBLE OBJECTS** | 像素坐标 / bbox | **暂不采用**（v1 后视情况加） |
+**ECoT 的 8 段链式输出**（论文 §4.1, Fig. 3）：
 
-**我们与 ECoT 的关键区别**：
+| # | ECoT 字段 | 内容 / 示例 | 我们的对应 |
+|---|----------|----------|----------|
+| 1 | **TASK** | 重述用户指令为 1 句陈述："Place the watermelon on the towel" | `task_instruction` (prompt) |
+| 2 | **PLAN** | 高层 sub-task 数字列表："1. Move to watermelon 2. Firmly grasp it 3. Move to towel 4. Place watermelon on towel" | `[plan]` |
+| 3 | **SUBTASK_REASONING** | 当前 sub-task 的理由 1-2 句："The watermelon is the first object the robot needs to interact with. The robot is not yet close to the watermelon, so the robot needs to move closer." | `[stage]` 前半 |
+| 4 | **SUBTASK** | 当前 sub-task 1 句："Move to the watermelon" | `[stage]` 后半 |
+| 5 | **MOVE_REASONING** | 当前 move 的理由 1 句："The watermelon is behind the robot, so it needs to move backward." | `[think]`（可选） |
+| 6 | **MOVE** | 离散方向 primitive："Move backward" | `[action]`（我们偏长） |
+| 7 | **GRIPPER POS** | 末端执行器像素坐标：`[156, 55]` | **暂不采用** |
+| 8 | **VISIBLE OBJECTS** | object bbox 列表：`Watermelon [126, 146, 141, 125], Towel [20, 59, 218, 198], ...` | **暂不采用** |
 
-| 维度 | ECoT | 我们 |
-|------|------|------|
-| 触发节奏 | 每帧全 7 层 | 仅 keyframe (~5-15 / ep) |
-| MOVE 粒度 | 离散方向 ("Move backward") | 较细 ("Lower the gripper onto the cup") |
-| 失败语义 | 无显式标注 | `[think]` 必填于 `retry` keyframe |
-| 输出格式 | 自由文本 | 严格 JSON |
+**关键发现 1：MOVE 是高度模板化的 primitive**（论文 §4.2 + Appendix B）：
 
-> ⚠️ **风格校验**: ECoT 论文原文如果你能附上，我会用具体示例对照检查我的总结。当前是基于我对论文 + 他们公开的 `embodied_features_bridge` 数据的理解推断。
+```
+move [forward/backward] [left/right] [up/down], tilt [up/down], rotate [clockwise/counterclockwise], [close/open] gripper
+```
+
+理论上 3^6 = 729 种组合，**实际只有 54 种在 >0.1% 样本里出现**。出现最多的：
+- `stop` (26.9%)
+- `close gripper` (10.8%) / `open gripper` (7.2%)
+- `move {down,left,right,up,forward,backward}` 单方向 (各 2-7%)
+
+MOVE 是从 4-step proprioception delta（阈值 0.03m）派生的，**不是 VLM 直接生成的**。
+
+**关键发现 2：ECoT 的数据生成是多阶段流水线**（论文 §4.2 Fig. 4），而非单 VLM 调用：
+
+```
+1. Prismatic-VLM   → 场景描述 ("Briefly describe the things in this scene...")
+2. Grounding DINO  → 物体 bbox (text conf > 0.2, box conf > 0.3)
+3. proprio → primitive  → MOVE 标签（规则，非 VLM）
+4. OWLv2 + SAM     → 2D 末端执行器像素位置 (GRIPPER POS)
+5. Gemini 1.0      → PLAN + SUBTASK + 各 reasoning 段
+```
+
+**关键发现 3：Gemini 输出用 XML-like 标签包裹**（论文 Fig. 11 prompt 原文）：
+
+```
+<task>...</task>  <plan>...</plan>  <subtask>...</subtask>
+<subtask_reason>...</subtask_reason>
+<move>...</move>  <move_reason>...</move_reason>
+```
+
+每个 step 一个 reasoning 字符串，所有 step 写成 Python dict `{step_id: reasoning_str}`。
+
+### 3.4 我们与 ECoT 的关键区别
+
+| 维度 | ECoT | 我们 | 影响 |
+|------|------|------|------|
+| **触发节奏** | 每帧全 8 段 (per-step AR) | 仅 keyframe (~5-15 / ep) | 我们 token 量降一个数量级，cascade-friendly |
+| **MOVE 来源** | 规则派生 + 729 模板 | VLM 直接生成（自然语言） | 我们更灵活但失去 primitive 一致性；可后续考虑加 primitive 校验 |
+| **MOVE 粒度** | 离散方向 (`"Move backward"`) | 较细 (`"Lower the gripper onto the cup"`) | 我们偏 ECoT 的 SUBTASK 风格 |
+| **数据生成** | 多阶段（Prismatic + GDINO + OWL+SAM + Gemini） | 单 VLM 调用（Gemini 一次性出全部） | 我们简化，靠 Gemini 视觉 grounding；牺牲 bbox 精确度 |
+| **失败语义** | 无显式标注 | `[think]` 必填于 `retry` keyframe | DROID retry 案例是我们的差异化价值 |
+| **输出格式** | XML-like tags in Python dict | 严格 JSON | 鲁棒性 ≈ 等价 |
+| **GRIPPER POS / OBJECTS** | 必有（核心 grounding 监督） | 暂不采用 | v1 后视 grounding 弱不弱再加 |
+
+**对我们 prompt 设计的指导**：
+1. **保留 ECoT 的层级**（TASK / PLAN / [SUBTASK_REASONING + SUBTASK] / [MOVE_REASONING + MOVE]）作为风格参照
+2. **去掉每帧节奏** → 我们只在 keyframe 出现
+3. **MOVE 自由化** → 但 fewshot 里可以混入"Move backward / Move left / Close gripper"类近-primitive 句式让模型保有该 prior
+4. **GRIPPER POS / OBJECTS 推迟** → 等基线训完看真实 grounding 表现
+
+> ⚠️ 当前 fewshot 里的 [`FEWSHOT_ASSISTANT`](annotate_droid/prompts.py) 描述偏 verbose。pilot 后可考虑调成 ECoT 风格的简短句式，对比 acceptance rate。
 
 ### 3.4 Fewshot
 
@@ -168,51 +213,133 @@ UC Berkeley 的 Embodied-Chain-of-Thought (Zhao et al., 2024) 是我们的风格
 
 **词边界检查**：`grip` 是 GRASP 动词，但 `gripper` 不应触发误判 → 用 `\bgrip\b` 正则。已踩过这个坑。
 
-## 6. 运行 pilot
+## 6. 集群 pilot 部署
 
-### 6.1 准备 100 episodes（offline JSONL 路径，推荐）
+数据流：
 
-为避免给标注 worker 装 1.7 TB DROID RLDS，提前 dump 100 集：
-
-```python
-# pilot_export.py（一次性脚本，待写）
-# - 从 DROID RLDS 流式取 100 个 success episode
-# - 写出 manifest.jsonl 和 images/<ep_id>/primary_NNNN.jpg
+```
+本地电脑 (numbnut)                      集群登录节点                          K8s Pod
+ ┌──────────────────┐                   ┌──────────────────┐               ┌─────────────────────┐
+ │ pod-tunnel proxy │ ◄── ssh tunnel ── │ kubectl exec ──→ │ ──── exec ──→ │ gsutil / python ann. │
+ │ (clash:10808)    │                   │                  │               │ (HTTP via jump:8906) │
+ └──────────────────┘                   └──────────────────┘               └─────────────────────┘
 ```
 
-manifest 格式见 `droid_reader.iter_jsonl` 的 docstring。
+### 6.1 启动代理（本地电脑！）
 
-### 6.2 跑 Qwen-VL-72B
+**必须在本地电脑跑**，不是在 pod 里。跑一次后保留终端，整段 pilot 期间都需要它存活：
 
 ```bash
-# H200 host
+# 本地电脑 (numbnut)
+~/.local/bin/pod-tunnel proxy &
+# 校验隧道：应看到 "OK: cluster-jump is listening on 8906"
+```
+
+### 6.2 下载 DROID_100 example (2 GB)
+
+进入 pod 后下载小子集做 pilot 验证：
+
+```bash
+# 集群登录节点
+kubectl exec -it deployment/zhaoqc-gpu-keepalive-zhaoqc-pi05-finetune-steps-25000 -- bash
+
+# Inside pod:
+export https_proxy=http://192.168.3.225:8906
+export http_proxy=$https_proxy
+
+# 验证代理是否工作
+curl -sI -x $https_proxy https://www.google.com | head -2
+
+# 下载 DROID_100 (~2 GB)
+mkdir -p /data/zhaoqc/droid_data
+gsutil -m cp -n -r gs://gresearch/robotics/droid_100 /data/zhaoqc/droid_data/
+```
+
+**关于 `gsutil` 断点续传**：
+- `gsutil cp` 对**单个大文件 > 8 MiB** 内置 resumable upload/download（用 tracker file）
+- 对**多文件**，加 `-n`（no-clobber）：已存在的 destination 跳过，重新跑命令即可"续传"
+- `-m`（multi-thread）+ `-r`（recursive）是标准批量传输组合
+- 失败重启就再跑同一条命令；不需要额外 flag
+
+下载全集（1.7 TB）：
+
+```bash
+# 仅在 pilot 通过后跑
+gsutil -m cp -n -r gs://gresearch/robotics/droid /data/zhaoqc/droid_data/
+```
+
+### 6.3 同步代码 + 安装依赖到 pod
+
+```bash
+# 本地电脑
+cd /home/numbnut/worksapce/RoboTwin
+rsync -avz policy/lap/scripts/annotate_droid/ \
+    --exclude __pycache__ \
+    k98s:/data/zhaoqc/RoboTwin/policy/lap/scripts/annotate_droid/
+rsync -avz policy/lap/scripts/annotate_droid_gemini.py \
+          policy/lap/scripts/annotate_droid_qwen.py \
+          k98s:/data/zhaoqc/RoboTwin/policy/lap/scripts/
+
+# Pod 里
+cd /data/zhaoqc/RoboTwin/policy/lap
+uv pip install --python .venv/bin/python pillow numpy
+# Gemini path
+uv pip install --python .venv/bin/python google-genai
+# Qwen path (if used)
+uv pip install --python .venv/bin/python openai
+```
+
+### 6.4 端到端 mock 测试（确认环境无误）
+
+不调真实 VLM，跑 mock dry-run：
+
+```bash
+# Inside pod
+cd /data/zhaoqc/RoboTwin
+python -m policy.lap.scripts.annotate_droid._dryrun /tmp/dryrun.jsonl
+# 期望: emitted=3 skipped=0 failed=0
+```
+
+### 6.5 跑 Gemini 2.5 Pro pilot 100 集
+
+```bash
+# Inside pod — ensure proxy env is set first
+export https_proxy=http://192.168.3.225:8906
+export http_proxy=$https_proxy
+export GOOGLE_API_KEY="...your key..."
+
+cd /data/zhaoqc/RoboTwin
+.venv/bin/python policy/lap/scripts/annotate_droid_gemini.py \
+    --rlds-dir /data/zhaoqc/droid_data/droid_100 \
+    --output   /data/zhaoqc/droid_cot/gemini_v0.1_pilot.jsonl \
+    --max-episodes 100 \
+    -v
+```
+
+预计：~$2 / 100 集，~5 min wall-clock（含 Gemini API 排队）。
+
+### 6.6 跑 Qwen-VL-72B pilot 100 集（可选）
+
+需要先在 H200 节点拉起 vLLM。如果还没现成 H200 deployment，告诉我，我可以补一份 yaml + 启动脚本。
+
+```bash
+# H200 host (separate pod / node with 2× H200)
 uv run vllm serve Qwen/Qwen2.5-VL-72B-Instruct \
     --tensor-parallel-size 2 \
     --max-model-len 32768 \
     --limit-mm-per-prompt image=20 \
     --port 8100
 
-# annotation worker
-uv run python policy/lap/scripts/annotate_droid_qwen.py \
-    --jsonl  /data/droid_pilot/manifest.jsonl \
-    --images /data/droid_pilot/images \
-    --output /data/droid_cot/qwen_v0.1_pilot.jsonl \
+# Annotation pod (same one as Gemini)
+.venv/bin/python policy/lap/scripts/annotate_droid_qwen.py \
+    --rlds-dir /data/zhaoqc/droid_data/droid_100 \
+    --output   /data/zhaoqc/droid_cot/qwen_v0.1_pilot.jsonl \
     --max-episodes 100 \
-    --base-url http://<h200_host>:8100/v1
+    --base-url http://<h200_pod_ip>:8100/v1 \
+    -v
 ```
 
-### 6.3 跑 Gemini 2.5 Pro
-
-```bash
-export GOOGLE_API_KEY=...
-uv run python policy/lap/scripts/annotate_droid_gemini.py \
-    --jsonl  /data/droid_pilot/manifest.jsonl \
-    --images /data/droid_pilot/images \
-    --output /data/droid_cot/gemini_v0.1_pilot.jsonl \
-    --max-episodes 100
-```
-
-### 6.4 评估
+### 6.7 评估
 
 写一个简单评估脚本（待补，类似 `view_robotwin_dataset.py`）：
 

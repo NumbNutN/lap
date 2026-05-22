@@ -22,6 +22,86 @@
 
 ---
 
+## 0.A. 2026-05-13 关键诊断升级：脆弱状态机 + grasp gripper 不闭合
+
+### 0.A.1 数据本质 = 脆弱状态机
+
+用户 sharp 诊断：当前所有 demo_clean 数据由 **motion-planning 算法生成**，每个 task 被拆解为 `approach → grasp → transport → put`。其中：
+
+- **每个 phase 的轨迹是 deterministic 最优解**（TOPP planner 给定起止 qpos 输出固定路径）
+- **Grasp 阶段尤其单一**：末端垂直下落、夹爪从 1.0 闭合到 0.0
+- 整个 task **像一个 4-state FSM**，每个 state 的"邻域"（covariance）极窄
+
+→ 训练分布 = 一组**很瘦的** trajectory tube。任何执行偏离 → 立刻出 tube → action expert 不知道怎么走 → 你视频里看到的"定在原地"
+
+### 0.A.2 实证：模型推理时夹爪几乎不闭合
+
+对比 demo_clean expert 和 `qpos_noise1_step30000` combo eval 三个 episode 的 gripper 值：
+
+| 数据源 | 夹爪 < 0.5 帧占比（L / R）| 平均（L / R）|
+|---|---|---|
+| **专家 demo (ep0)** | 23% / 21% | 0.77 / 0.79 |
+| **模型 ep0 / ep1 / ep2** | 0% / 0-1% | **0.99 / 0.99** |
+
+**模型推理时夹爪几乎从不闭合**，但 dry-run（专家轨迹精确 state 上）的 gripper 维度 `pred_std/gt_std ≈ 1.0` 没有 mode collapse → 模型有能力闭合，**只是推理时永远到不了"专家闭合时的精确 state"**。
+
+### 0.A.3 间歇恢复模式（用户观察）
+
+- 夹爪偏左 1cm 悬在方块上 → 不动了（OOD）
+- 偶然晃到方块正上方 → cascade 立刻变成 "Squeeze the fingers of the right gripper..." → 但 action expert 执行不完美又漂出去 → 循环
+
+这个观察支持："**covariate shift 瓶颈具体在 action expert，不在 VLM**"。VLM 看图给出的 reasoning 是稳定的（只看图，不看 state），action expert 看 state 主导 → 它才是受 shift 拖累的部件。
+
+### 0.A.4 解决方案优先级（重排）
+
+| 方案 | 工程量 | 预期 | 备注 |
+|---|---|---|---|
+| **遥操作数据混入** | 大（要 hardware + 标注） | 高 | 业界公认；多样性天然，覆盖 motion-planner 进不去的 state |
+| **DAgger** | 中-大（脚本+迭代） | 高 | 标准解；我们有 expert 可用 (mplib) |
+| **Atomic skill data + cascade-decoupling** ★ | 大但有新意 | 中-高 | 见 §0.A.5 |
+| **Error-correction reasoning** | 中 | 中 | 需要失败数据，依赖前两项 |
+| **state-noise σ=0.1** | 极小 | 低（"轻量 DAgger"） | 用户认为没新意，证实过 0.02 不够 |
+| **客户端 gripper override** | 极小（救火） | 低 | 不治本 |
+
+### 0.A.5 用户提议：Atomic skill data + cascade-decoupling（★ 值得专门挖）
+
+**思路**：训练时混入 **task-agnostic motion primitive** 数据，如 "move left gripper 5cm in +x"。cascade 文本指代具体 motion 量级（"the gripper is at the left side of the block, so move 5cm right"），action expert 学到的是 "看到 cascade 提到 X 量级移动，就移 X"。
+
+**为什么有意思**：
+1. **解耦**：高层 VLM 出 motion 级 reasoning + 低层 action expert 执行 primitive → hierarchical-VLA
+2. **State coverage 高**：5cm-right primitive 在**任何起始 state** 都有效 → 训练时天然采集多样 state
+3. **新颖度**：当前 cascade-VLA 工作（π0 / RT-2）的 reasoning 都在"语义级"（pick red cube），把 reasoning 拉到 "motion primitive 级" 没人做过
+4. **直击当前瓶颈**：当前 action expert 学的是 "given state s in approach phase, output 8 future qpos" — state-specific 才是脆弱根源；改成 primitive-specific 直接绕过
+
+**实施粗框架**：
+- 数据采集：用 motion-planner 在 sim 里生成简单原子动作（move +x/−x/+y/.../rotate wrist/.../open-close gripper）的 short trajectories，起始 state 随机化
+- Cascade text 用模板：`"[action] move the {arm} gripper {dx}cm in the {direction} direction."`
+- 训练时把这些 episodes 混入 demo_clean，权重 0.2-0.5 之间
+
+**风险**：
+- 单 episode 长度短（一个 primitive 几帧）→ action_horizon=8 可能跨多个 primitive；要么短 horizon，要么 padding
+- Cascade 怎么 emit "5cm" 这种数字？模型对几何数字的精度有限（这是 VLA 的已知弱点）
+
+### 0.A.6 关于 work positioning（用户视角）
+
+如果**目标 = 强调 cascade reasoning 解决长程任务**：
+- 简单 pick-place 任务（带 grasp 成功的）的 demo 就足够 → VLM reasoning 是 selling point，action expert 不需要超精细
+- 解决方法：把现有 pick-place 任务跑通（DAgger 或 teleoperation 数据）→ 用 cascade 处理 sequencing → 论文卖点是 long-horizon reasoning
+
+如果**目标 = 通用精细操作**：
+- 必须把 action expert 的 state-covariate-shift 彻底解决
+- Atomic skill data + cascade-decoupling 是值得投入的研究方向
+
+### 0.A.7 几个被否定的备选
+
+| 想法 | 否定理由 |
+|---|---|
+| 扰动 state + 恢复 训练 | 等价于轻量 DAgger，缺新颖度（用户判断） |
+| state-only retrain with σ=0.1 | 还是 ε-tube 内扩散，shape 不匹配实际 policy 行为 |
+| 完全 vision-only 重训 | π0/RT-2 风格，需重新训练 stage 1+2，工程量大且不属于"cascade-VLA"研究范围 |
+
+---
+
 ## 1. A1.b last_arm stickiness（哪只手腕摄像头）
 
 ### 1.1 背景
@@ -547,6 +627,111 @@ kubectl -n zhaoqc exec ... -- bash -lc \
 
 ---
 
+## 7. 概念性讨论（covariate shift / DAgger / state-image 依赖）
+
+整理 2026-05-13 讨论。这些是**长期需要保持注意的概念**，每次涉及训练 / 推理 / 数据集设计时回来翻一翻。
+
+### 7.1 Covariate shift 的严格含义
+
+**经典定义**：训练数据 `p_train(x)`、测试数据 `p_test(x)` 不一致；但任务的真实条件分布 `p(y|x)` 没变。
+
+**在模仿学习里的特殊版本** = **compounding error**：
+- 训练时 state 来自专家 trajectory：`s_t ∼ p_expert(s)`
+- 测试时 robot 自己产生 state：`s_t ∼ p_policy(s | π)`
+- 每一步微小预测误差 → 下一步 state 偏移 → 在更偏的 state 上做预测 → 进一步偏移 → 雪崩
+
+**我们具体情况**：
+- 训练里 `state[t] == joint_action/vector[t]` 都是 motion-planning 算法的精确解
+- 推理里 state 由 TOPP-interpolate(prev_action) 产生，有不可避免的 servo / numerical 误差
+- 误差累积 → state 偏离脆弱状态机 → 模型卡死
+
+### 7.2 DAgger 本质 + 我们这能不能用
+
+**算法**（Ross et al. 2011）：
+```
+循环 k 轮：
+  1. 当前 policy π_k 在 env rollout → 收集 on-policy state {s_t}
+  2. 对每个 s_t 问 expert：a* = expert(s_t)
+  3. 把 (s_t, a*) 加入训练集
+  4. 重训 π_{k+1}
+```
+
+**对我们可用性**：
+- ✅ 有 expert（mplib motion planner 接受任意 state 都能算）
+- ✅ 有 sim 可 rollout
+- 工程量：~1 day 写脚本 + 多轮 (~6h 每轮) 重训
+
+**和 BC + state noise 的本质区别**：
+- state noise：ε-球扩散，shape 是高斯
+- DAgger：on-policy 自然产生 state，shape 是 policy 实际行为对应的真实分布
+- 后者效率高得多（覆盖的就是 policy 实际会去的地方）
+
+### 7.3 State 还是 Image：模型主要靠哪个？
+
+**当前架构事实**：
+- Image 输入：head_camera + wrist_camera（wrist 槽可见手腕到夹爪）
+- State 输入：14 维 qpos 连续注入到 action expert（`discrete_state_input=False`）
+
+**模型实际依赖**：
+- 训练数据不变量：`actions[t][0] == state[t]` → 模型只要把 state copy 到 action[0] 就 perfect 那部分 loss
+- 后 7 帧通过 state 锚定坐标系 + 看图象 / cascade 决定方向
+- → **数据结构强制 state 成为主要依赖**
+
+**State OOD 时的退化**：
+- Image 还在但只给"语义/粗位置"
+- State 偏离 → 模型按训练里相似 state 找最近邻 → 找不到 → 预测退化到几个 mode 的平均 → 动作幅度变小，"定在原地"
+
+**减弱 state 依赖的可能改造**：
+| 方案 | 改动 | 风险 |
+|---|---|---|
+| `state_dropout: p` | 训练时按概率 p 把 state 置零 | 影响精度 |
+| `discrete_state_input=True` | state 离散化成 bin token | π0.5 这么做，可用 |
+| 完全去掉 state | 改架构成 vision-only | 工程量大，可能精度掉太多 |
+| **Atomic skill data**（用户提议，见 §0.A.5）| 训练 primitive level → state-coverage 天然高 | 数据生成 + cascade 模板 |
+
+### 7.4 Zero-shot 恢复策略（不重训）
+
+用户想问：模型遇到 OOD 时，**能不能比"原地抖"更聪明地"晃回 in-distribution"**，不用 expert 标签？
+
+**纯 zero-shot 几乎不行**，原因：模型不知道"哪里是 in-distribution"。但有几个 hack：
+
+#### 7.4.1 客户端 heuristic（最快、不重训）
+
+- **stuck-detection + jiggle**：检测 N 步 state 几乎不变 → 注入小幅度随机扰动 → 推到附近可能 in-distribution 位置。**风险**：撞坏物体
+- **gripper override on cascade keyword**：cascade [action] 含 "close / grasp / squeeze" + arm 悬停 → 强制 gripper=0。**针对当前 0/10 的 grasp 失败模式**
+- **uncertainty-aware action gating**：flow matching 多次采样观察 variance；高 variance → 切保守模式（动作幅度 ×0.5）
+
+#### 7.4.2 训练时学一个"密度估计 / 不确定性 head"（需重训，中等工程量）
+
+- 训练辅助 head 预测 `log p(s_t)` 或 action variance
+- 运行时实时估计 "我现在 in-distribution 吗"
+- 高不确定 → 切到保守 / 探索模式
+
+#### 7.4.3 VLM 作 fallback：高层规划 → 运动规划
+
+- Action expert uncertain 时，cascade 直接 emit "move +x 5cm" 这种粗粒度 motion
+- Motion-planner 解算到具体 joint trajectory
+- 这是 §0.A.5 atomic skill 的另一种用法 — 把 VLM 当 zero-shot 高层 (来自互联网视觉常识) + 运动规划当低层 → **hierarchical-VLA**
+
+### 7.5 其它常规方案综合表
+
+| 方法 | 关键思想 | 重训 | 收益 | 我们这适用度 |
+|---|---|---|---|---|
+| **DAgger** | on-policy state + expert label | ✓ | 高 (★★★) | 可用，需工程 |
+| **遥操作数据混合** | 真人多样性 | ✓ | 高 (★★★) | 需 hardware |
+| **BCN (state-noise)** | 训练 state 加噪声 | ✓ | 低 | σ=0.02 失败，σ=0.1 没意思 |
+| **State dropout** | 训练随机置零 state | ✓ | 中 | 改 dataloader |
+| **Discrete state** | state token 化 | ✓ | 中 | 改 1 个 config flag |
+| **Atomic skill data** | task-agnostic motion primitive | ✓ | 中-高 (★★) | **本文提议，新颖** |
+| **Error-correction reasoning** | cascade 含 "oops" 纠错 | ✓ | 中 | 需失败数据 |
+| **Hierarchical (VLM keyframe + motion planner)** | VLM 出 waypoint，planner 解算 | 架构改 | 高 | 已有 mplib |
+| **Online RL fine-tuning** | IL init + RL refine | ✓ | 高，慢 | 需 reward 设计 |
+| **Diffusion at sequence level** | 长序列 action 分布 | ✓✓ | 高 | 架构大改 |
+| **Stuck-detection + jiggle** | 客户端启发 | ✗ | 低 | 立即可做 |
+| **Gripper override** | 客户端启发 | ✗ | 低-中 | 立即可做 |
+
+---
+
 ## 总览 todo（按优先级）
 
 ### 立即（不重训）
@@ -570,3 +755,21 @@ kubectl -n zhaoqc exec ... -- bash -lc \
 ### 暂缓
 
 10. 🔬 Stage 3 联合训练 / cascade corruption（teacher-forcing gap，§3）
+
+---
+
+## 工作 positioning（2026-05-13 决策）
+
+两条岔路（用户视角）：
+
+**A. 论文卖点 = "用 cascade reasoning 解决长程任务"**
+- 简单 pick-place 任务（带 grasp 成功）就够 → VLM reasoning 是 selling point，action expert 不需要超精细
+- 路径：用 DAgger 或遥操作数据补齐 pick-place 成功 → 用 cascade 做 sequencing → 论文卖点是 long-horizon reasoning
+- 投入：1-2 周
+
+**B. 通用精细操作的 cascade-VLA**
+- 必须解决 action expert 的 state covariate shift
+- 路径：Atomic skill data + cascade-decoupling（§0.A.5） — **新颖**且**直击瓶颈**
+- 投入：2-3 月级别
+
+**当前默认走 A** —— 路径稳，时间合理。B 留作后续 follow-up 工作。

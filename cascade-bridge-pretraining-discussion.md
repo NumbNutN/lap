@@ -759,13 +759,29 @@ rsync -avz policy/lap/ \
 ```
 然后重试 rsync。
 
-#### Step 2 — 进入 pod，启动外网代理
+#### Step 2 — 启动外网代理（**本地电脑**，不是 pod 内）
+
+`pod-tunnel proxy` 的拓扑：本地 clash 端口 → ssh 反向隧道 → jump host → pod 通过
+`http://192.168.3.225:8906` 出网。**必须在本地电脑运行**，pod 内运行不会建立任何隧道。
 
 ```bash
+# 本地电脑 (numbnut)
+~/.local/bin/pod-tunnel proxy &
+# 校验：应看到 "OK: cluster-jump is listening on 8906"
+```
+
+代理这条进程必须在整段 pod 任务期间保持存活。
+
+进入 pod 并设置代理环境变量：
+
+```bash
+# 集群登录节点
 kubectl exec -it deployment/zhaoqc-gpu-keepalive-zhaoqc-pi05-finetune-steps-25000 -- bash
 
-# Inside pod:
-~/.local/bin/pod-tunnel proxy &
+# Inside pod — 把代理变量导出到 shell：
+export https_proxy=http://192.168.3.225:8906
+export http_proxy=$https_proxy
+
 # Verify proxy is up
 curl -sI https://huggingface.co | head -3
 ```
@@ -810,8 +826,8 @@ uv pip install --python .venv/bin/python ijson decord
 #### Step 6 — 启动训练
 
 ```bash
-# Optionally launch pod-tunnel for wandb if not already running
-~/.local/bin/pod-tunnel proxy &
+# 如果 wandb / 远端依赖需要联网，确认 Step 2 的 pod-tunnel proxy 在本地仍在跑，
+# pod 内已 export https_proxy。这两件事不需要在 pod 内启动任何 pod-tunnel 命令。
 
 # Train
 .venv/bin/python scripts/train.py --config-name lap_bridge_pretrain

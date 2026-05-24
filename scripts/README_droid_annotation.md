@@ -337,8 +337,11 @@ cd /data/zhaoqc/RoboTwin
 注意点：
 
 - `--rlds-name droid_100` —— DROID_100 子集的 TFDS builder name 不同于全集 `droid`。
-- `--attn flash_attention_2` —— 在 H100/H200 上快 30%+，OOM 风险更低。如果 flash-attn
-  没装，去掉这个 flag（用默认 SDPA）。
+- `--attn flash_attention_2` —— **可选**。在 H100/H200 上快 20-30%。**venv Python
+  版本 (3.11) 与系统 Python (3.10) 不同时，`pip install flash-attn` 装到系统不进 venv**
+  —— 必须 `uv pip install --python .venv/bin/python flash-attn --no-build-isolation`。
+  装不上就别加这个 flag，默认走 SDPA 也很快。client 已经做了 fallback：要 flash 但
+  venv 装不上时会自动降到 SDPA 并 warning，不会 crash。
 - Qwen2.5-VL-72B fp16 ~145 GB —— 2× H200 (282 GB) 或 1× H200+CPU offload。`device_map="auto"`
   会自动 tensor-split。如果 OOM 可改 `--max-pixels 200704` (256×28×28) 减视觉 token。
 

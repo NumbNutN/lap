@@ -28,9 +28,20 @@ from .schema import EpisodeAnnotation
 from .schema import KeyframeAnnotation
 
 
-# Phrasing whitelists used for A3 / R2-R3.
+# Phrasing whitelists used for A3 / R2-R3 (positive constraint at grasp /
+# release keyframes — these MUST mention grasping / releasing).
 GRASP_VERBS = {"close", "grasp", "grip", "clamp", "squeeze", "pinch", "pick"}
 RELEASE_VERBS = {"open", "release", "let go", "drop", "place", "set down", "put down"}
+
+# Stricter vocab used by A8 (negative constraint: at motion keyframes the
+# model can describe IMMINENT action like "Place X" / "Position to pick Y"
+# without contradicting the gripper state — those are stage-purpose verbs,
+# not physical-transition verbs. A8 should only fire on direct gripper
+# physical-action verbs like "open the gripper" / "release X" that flatly
+# contradict the observed gripper state. 5-ep pilot showed the old A8
+# triggering on every "Place"/"Pick" at mid-motion frames, all false.)
+STRICT_GRASP_PHRASES = {"close the gripper", "close gripper", "clamp", "squeeze"}
+STRICT_RELEASE_PHRASES = {"open the gripper", "open gripper", "release"}
 
 # Hard length caps (R8 in the system prompt). These map to ~2-3 sentences.
 MAX_PLAN_CHARS = 600
@@ -137,17 +148,21 @@ def audit_episode(
                     f"{kf.think[:60]!r}"
                 )
 
-    # A8: gripper-state consistency
+    # A8: gripper-state consistency (uses STRICT vocab — see top of file).
+    # Pilot data showed broad RELEASE_VERBS / GRASP_VERBS overfire on
+    # mid-motion frames where the model writes "Place X" or "Pick Y" as
+    # stage-intent phrasing. A8 should only flag direct physical
+    # contradictions ("open the gripper" while it is closed).
     if expected_gripper_states is not None and len(expected_gripper_states) == len(ann.keyframes):
         for i, (kf, gs) in enumerate(zip(ann.keyframes, expected_gripper_states, strict=True)):
-            if gs == "closed" and _contains_any(kf.action, RELEASE_VERBS):
+            if gs == "closed" and _contains_any(kf.action, STRICT_RELEASE_PHRASES):
                 report.errors.append(
-                    f"A8 keyframes[{i}] gripper closed but action describes release: "
+                    f"A8 keyframes[{i}] gripper closed but action says it is opening: "
                     f"{kf.action!r}"
                 )
-            if gs == "open" and _contains_any(kf.action, GRASP_VERBS):
+            if gs == "open" and _contains_any(kf.action, STRICT_GRASP_PHRASES):
                 report.errors.append(
-                    f"A8 keyframes[{i}] gripper open but action describes grasp: "
+                    f"A8 keyframes[{i}] gripper open but action says it is closing: "
                     f"{kf.action!r}"
                 )
 

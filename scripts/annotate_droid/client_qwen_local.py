@@ -100,13 +100,31 @@ class QwenVLLocalClient:
         if isinstance(torch_dtype, str) and torch_dtype != "auto":
             dtype = getattr(torch, torch_dtype)
 
+        # If the caller asked for flash_attention_2 but the flash_attn package
+        # is missing from THIS venv (a common source of confusion when the
+        # system Python and venv Python differ), silently downgrade to SDPA
+        # rather than crashing — transformers' own check raises ImportError
+        # that aborts the whole pipeline.
+        effective_attn = attn_implementation
+        if effective_attn == "flash_attention_2":
+            try:
+                import flash_attn  # noqa: F401
+            except ImportError:
+                print(
+                    "[QwenLocal] WARNING: --attn flash_attention_2 requested "
+                    "but flash_attn not importable in this venv. Falling back "
+                    "to SDPA (transformers default). To install:\n"
+                    "  uv pip install --python .venv/bin/python flash-attn --no-build-isolation"
+                )
+                effective_attn = "sdpa"
+
         load_kwargs = dict(torch_dtype=dtype, device_map=device_map)
-        if attn_implementation is not None:
-            load_kwargs["attn_implementation"] = attn_implementation
+        if effective_attn is not None:
+            load_kwargs["attn_implementation"] = effective_attn
 
         print(f"[QwenLocal] Loading model from {model_path}  "
               f"dtype={torch_dtype}  device_map={device_map}  "
-              f"attn={attn_implementation or 'default'}")
+              f"attn={effective_attn or 'default'}")
         t0 = time.monotonic()
         # AutoModelForVision2Seq auto-detects Qwen2.5-VL vs Qwen2-VL from
         # the config.json's architectures field.

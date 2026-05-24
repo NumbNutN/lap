@@ -235,9 +235,14 @@ MOVE 是从 4-step proprioception delta（阈值 0.03m）派生的，**不是 VL
 # 校验隧道：应看到 "OK: cluster-jump is listening on 8906"
 ```
 
-### 6.2 下载 DROID_100 example (2 GB)
+### 6.2 数据 + 模型已就位（user-confirmed paths）
 
-进入 pod 后下载小子集做 pilot 验证：
+```
+DROID_100 数据集 (2 GB):  /data/datasets/droid_data_template/
+Qwen weights:             policy/lap/Qwen2.5-VL-72B-Instruct/   (在 pod 内 /data/zhaoqc/RoboTwin/...)
+```
+
+如果以后要从 0 重新下载：
 
 ```bash
 # 集群登录节点
@@ -250,9 +255,9 @@ export http_proxy=$https_proxy
 # 验证代理是否工作
 curl -sI -x $https_proxy https://www.google.com | head -2
 
-# 下载 DROID_100 (~2 GB)
-mkdir -p /data/zhaoqc/droid_data
-gsutil -m cp -n -r gs://gresearch/robotics/droid_100 /data/zhaoqc/droid_data/
+# 下载 DROID_100 (~2 GB) —— 已经做过这步则跳过
+mkdir -p /data/datasets
+gsutil -m cp -n -r gs://gresearch/robotics/droid_100 /data/datasets/droid_data_template/
 ```
 
 **关于 `gsutil` 断点续传**：
@@ -279,13 +284,23 @@ rsync -avz policy/lap/scripts/annotate_droid/ \
 rsync -avz policy/lap/scripts/annotate_droid_gemini.py \
           policy/lap/scripts/annotate_droid_qwen.py \
           k98s:/data/zhaoqc/RoboTwin/policy/lap/scripts/
+```
 
-# Pod 里
+Pod 内安装依赖 —— **挑你要走的那条路径装**：
+
+```bash
 cd /data/zhaoqc/RoboTwin/policy/lap
+# 通用依赖（所有路径都要）
 uv pip install --python .venv/bin/python pillow numpy
-# Gemini path
+
+# === Gemini 2.5 Pro path ===
 uv pip install --python .venv/bin/python google-genai
-# Qwen path (if used)
+
+# === Qwen-VL local HF path (推荐：因为 user 已经下了权重) ===
+uv pip install --python .venv/bin/python transformers accelerate qwen-vl-utils
+# torch / flash-attn 应该已经在 .venv 里（pi05/lap 训练环境复用）
+
+# === Qwen-VL vLLM HTTP path (只在另起 vLLM 服务端时需要) ===
 uv pip install --python .venv/bin/python openai
 ```
 
@@ -300,7 +315,38 @@ python -m policy.lap.scripts.annotate_droid._dryrun /tmp/dryrun.jsonl
 # 期望: emitted=3 skipped=0 failed=0
 ```
 
-### 6.5 跑 Gemini 2.5 Pro pilot 100 集
+### 6.5 跑 Qwen-VL-72B local HF pilot 100 集（**推荐主路径**）
+
+权重已在 pod 内 `/data/zhaoqc/RoboTwin/policy/lap/Qwen2.5-VL-72B-Instruct/`，数据集
+已在 `/data/datasets/droid_data_template/`。一条命令搞定：
+
+```bash
+# Inside pod — 不需要代理（local inference 全离线）
+cd /data/zhaoqc/RoboTwin
+.venv/bin/python policy/lap/scripts/annotate_droid_qwen.py \
+    --mode local \
+    --model-path  /data/zhaoqc/RoboTwin/policy/lap/Qwen2.5-VL-72B-Instruct \
+    --rlds-dir    /data/datasets/droid_data_template \
+    --rlds-name   droid_100 \
+    --output      /data/zhaoqc/droid_cot/qwen_v0.1_pilot.jsonl \
+    --max-episodes 100 \
+    --attn flash_attention_2 \
+    -v
+```
+
+注意点：
+
+- `--rlds-name droid_100` —— DROID_100 子集的 TFDS builder name 不同于全集 `droid`。
+- `--attn flash_attention_2` —— 在 H100/H200 上快 30%+，OOM 风险更低。如果 flash-attn
+  没装，去掉这个 flag（用默认 SDPA）。
+- Qwen2.5-VL-72B fp16 ~145 GB —— 2× H200 (282 GB) 或 1× H200+CPU offload。`device_map="auto"`
+  会自动 tensor-split。如果 OOM 可改 `--max-pixels 200704` (256×28×28) 减视觉 token。
+
+吞吐预估（H200，flash_attention_2，bf16）：
+- 单 episode ~10 keyframes ≈ 2-5 秒推理
+- 100 集 ≈ 5-10 分钟 wall-clock
+
+### 6.6 跑 Gemini 2.5 Pro pilot 100 集（备选 / 对照组）
 
 ```bash
 # Inside pod — ensure proxy env is set first
@@ -310,36 +356,40 @@ export GOOGLE_API_KEY="...your key..."
 
 cd /data/zhaoqc/RoboTwin
 .venv/bin/python policy/lap/scripts/annotate_droid_gemini.py \
-    --rlds-dir /data/zhaoqc/droid_data/droid_100 \
-    --output   /data/zhaoqc/droid_cot/gemini_v0.1_pilot.jsonl \
+    --rlds-dir  /data/datasets/droid_data_template \
+    --rlds-name droid_100 \
+    --output    /data/zhaoqc/droid_cot/gemini_v0.1_pilot.jsonl \
     --max-episodes 100 \
     -v
 ```
 
 预计：~$2 / 100 集，~5 min wall-clock（含 Gemini API 排队）。
 
-### 6.6 跑 Qwen-VL-72B pilot 100 集（可选）
+### 6.7 跑 Qwen-VL-72B vLLM HTTP pilot（更高吞吐场景）
 
-需要先在 H200 节点拉起 vLLM。如果还没现成 H200 deployment，告诉我，我可以补一份 yaml + 启动脚本。
+如果 pilot 通过后要做全集（76k）标注，单进程 HF transformers 跑会比较慢。
+那时切到 vLLM 路径：
 
 ```bash
-# H200 host (separate pod / node with 2× H200)
-uv run vllm serve Qwen/Qwen2.5-VL-72B-Instruct \
+# 在 H200 deployment 启 vLLM server
+uv run vllm serve /data/zhaoqc/RoboTwin/policy/lap/Qwen2.5-VL-72B-Instruct \
     --tensor-parallel-size 2 \
     --max-model-len 32768 \
     --limit-mm-per-prompt image=20 \
     --port 8100
 
-# Annotation pod (same one as Gemini)
+# 标注 worker
 .venv/bin/python policy/lap/scripts/annotate_droid_qwen.py \
-    --rlds-dir /data/zhaoqc/droid_data/droid_100 \
-    --output   /data/zhaoqc/droid_cot/qwen_v0.1_pilot.jsonl \
-    --max-episodes 100 \
+    --mode vllm \
     --base-url http://<h200_pod_ip>:8100/v1 \
+    --rlds-dir  /data/datasets/droid_data_template \
+    --rlds-name droid_100 \
+    --output    /data/zhaoqc/droid_cot/qwen_v0.1_pilot.jsonl \
+    --max-episodes 100 \
     -v
 ```
 
-### 6.7 评估
+### 6.8 评估
 
 写一个简单评估脚本（待补，类似 `view_robotwin_dataset.py`）：
 

@@ -67,10 +67,15 @@ the immediate sub-goal? Use concrete object names. Do NOT restate the plan.>",
 keyframes, or when the next move requires non-obvious reasoning (e.g. \
 'the cup is occluded so the gripper must approach from the right'). Skip \
 this field (write null) for routine grasp/release/motion keyframes.>",
-      "action": "<1 imperative verb phrase, ≤ 12 words. What is the robot \
-doing at this keyframe. Examples: 'Lower the gripper onto the red cube', \
-'Open the gripper to release the toy', 'Move the gripper forward over the \
-plate'. NOT a full sentence with conditions.>"
+      "action": "<Imperative phrase, OPEN VOCABULARY, ≤ 18 words. Style \
+ranges from atomic primitives to richly grounded compound actions:\n\
+  - atomic:      'Close the right gripper'\n\
+  - grounded:    'Approach the red cube on the left'\n\
+  - geometric:   'Rotate the yaw angle to align the gripper on top of the block'\n\
+  - compound:    'Close the gripper and push the block on the right side'\n\
+Pick the level that best describes what is happening — prefer concrete \
+object names and spatial qualifiers over generic 'move forward / down'. \
+Compound actions are OK when naturally coupled (e.g. close + push).>"
     },
     ...
   ]
@@ -133,41 +138,50 @@ FEWSHOT_ASSISTANT = {
         "watermelon, 2) grasp it firmly, 3) lift and carry it over the "
         "towel, 4) place it down and release."
     ),
+    # Fewshot intentionally covers the four action styles the system prompt
+    # describes (atomic / grounded / geometric / compound), so the VLM
+    # sees the full vocabulary range in one example.
     "keyframes": [
         {
             "frame_idx": 0,
             "stage": "Episode start. The gripper is open and far from the watermelon.",
             "think": None,
-            "action": "Begin moving toward the watermelon.",
+            # grounded
+            "action": "Approach the watermelon on the right side of the counter.",
         },
         {
             "frame_idx": 38,
-            "stage": "The gripper has reached the watermelon's vicinity and is preparing to descend.",
+            "stage": "The gripper has reached the watermelon and is preparing to grasp it.",
             "think": None,
-            "action": "Lower the gripper above the watermelon.",
+            # geometric
+            "action": "Lower the gripper and align the fingers with the watermelon's centre.",
         },
         {
             "frame_idx": 52,
             "stage": "The fingers have closed around the watermelon, ready to lift.",
             "think": None,
-            "action": "Close the gripper on the watermelon.",
+            # atomic
+            "action": "Close the gripper.",
         },
         {
             "frame_idx": 85,
-            "stage": "Carrying the watermelon laterally toward the towel area.",
+            "stage": "Carrying the watermelon laterally toward the towel.",
             "think": None,
-            "action": "Move the watermelon over the towel.",
+            # compound
+            "action": "Lift the watermelon and carry it to the position above the towel.",
         },
         {
             "frame_idx": 110,
             "stage": "The watermelon is positioned above the towel and the gripper is releasing.",
             "think": None,
+            # compound — release + intent
             "action": "Open the gripper to place the watermelon on the towel.",
         },
         {
             "frame_idx": 124,
             "stage": "Watermelon placed on the towel. Episode complete.",
             "think": None,
+            # atomic
             "action": "Retract the gripper.",
         },
     ],

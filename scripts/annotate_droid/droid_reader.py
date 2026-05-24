@@ -68,6 +68,8 @@ class EpisodeBundle:
 def iter_droid_rlds(
     data_dir: str,
     *,
+    dataset_name: str = "droid",
+    dataset_version: str | None = None,
     max_episodes: int | None = None,
     success_only: bool = True,
     skip: int = 0,
@@ -75,11 +77,17 @@ def iter_droid_rlds(
     """Iterate DROID RLDS episodes, yielding one EpisodeBundle at a time.
 
     Args:
-        data_dir: path to the TFDS-formatted DROID root (contains
-            ``droid/1.0.1/...``).
+        data_dir: path to the TFDS-formatted DROID root. Expected layout
+            is ``<data_dir>/<dataset_name>/<version>/...``.
+        dataset_name: TFDS builder name. Use ``"droid"`` for the full
+            76k-episode release, ``"droid_100"`` for the 2 GB pilot subset.
+        dataset_version: optional version pin (e.g. ``"1.0.1"``). When
+            None, TFDS picks the latest version present.
         max_episodes: stop after this many bundles (None = full set).
         success_only: filter the RLDS stream by the standard "success"
-            file_path regex used by the openpi DROID loader.
+            file_path regex used by the openpi DROID loader. The
+            ``droid_100`` subset is already all-success, so this filter
+            is a no-op on it but harmless.
         skip: skip the first N episodes (for resume after crash).
 
     Memory: streams via tf.data; only one episode's tensors materialise at
@@ -92,7 +100,10 @@ def iter_droid_rlds(
     import dlimp as dl
 
     tf.config.set_visible_devices([], "GPU")
-    builder = tfds.builder("droid", data_dir=data_dir, version="1.0.1")
+    builder_kwargs: dict = {"data_dir": data_dir}
+    if dataset_version is not None:
+        builder_kwargs["version"] = dataset_version
+    builder = tfds.builder(dataset_name, **builder_kwargs)
     ds = dl.DLataset.from_rlds(builder, split="train", shuffle=False)
 
     if success_only:

@@ -35,7 +35,7 @@ RELEASE_VERBS = {"open", "release", "let go", "drop", "place", "set down", "put 
 # Hard length caps (R8 in the system prompt). These map to ~2-3 sentences.
 MAX_PLAN_CHARS = 600
 MAX_STAGE_CHARS = 350
-MAX_ACTION_WORDS = 18
+MAX_ACTION_WORDS = 22  # allow geometric/compound phrases like "rotate yaw to align"
 
 # Keyframe types where think is expected (R4)
 TYPES_REQUIRING_THINK = {"retry"}

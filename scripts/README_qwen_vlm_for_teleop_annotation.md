@@ -1,4 +1,11 @@
-# Qwen2.5-VL-72B vLLM 部署 + prompt 设计（给 teleop 手动标注做 auto-fill）
+# Qwen2.5-VL-72B vLLM 部署（给 teleop 手动标注做 auto-fill）
+
+> **更新 2026-05-24**: 本 doc 现在只覆盖**基础设施 + 集成**。Prompt 设计 / 输出 schema / fewshot / audit 规则迁移到独立的接口契约文档：
+>
+> - **Prompt engineering spec**: [`README_prompt_engineering_spec.md`](README_prompt_engineering_spec.md)（接口契约，部署 agent 可改）
+> - **标注设计哲学**: [`README_annotation_design.md`](README_annotation_design.md)（架构选择记录）
+>
+> 本 doc §5（system prompt）/§7（audit）/§9（GUI 集成）的内容已是旧版，**以 prompt engineering spec 为准**。
 
 ## 1. 上下文
 

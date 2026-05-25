@@ -397,7 +397,7 @@ playground episode0 frames 82-99：操作员调位置 / 卡壳 / 误操作 — *
 2. **`quality` flag 加不加**：用户提议，**强建议加**。下次手标 GUI 升级时加 dropdown
 3. **`stage` 是不是真的需要每段重新写**：相邻段可能 stage 一样（都在 "approach phase"）。如果允许 dedup（多个段共享同一 stage 字符串），可以节省人力 + 增强 cascade 缓存效率。**待 pilot 100 集后看相邻 stage 重复率**
 4. **是否引入 GROUNDING_OBJECTS**：参 ECoT。VLM 输出每帧检测到的物体 bbox 列表。**LAP cascade 用不太到，可放 v2**
-5. **think 是否扩展到非 retry 段**：例如 "为什么选这个朝向" / "为什么先抓左边的方块"。**可选 enrichment**，对训练有 marginal gain 但显著增 token
+5. **think 是否扩展到非 retry 段**：~~原推荐：稀疏特殊信号~~ → **§11 架构升级后改为"selectively dense"**：retry 必填，其它类有非显然决策时填，约 30-40% keyframe。详见 §11.4
 
 ---
 
@@ -407,4 +407,166 @@ playground episode0 frames 82-99：操作员调位置 / 卡壳 / 误操作 — *
 - [ ] **加 quality dropdown**：GUI + schema 升级；训练 dataset filter
 - [ ] **mimo 标注转 LAP 风格脚本**：mimo 的 stage 是纯 obs，需要拼接 plan 上下文 → 用 Qwen-VL 跑一次 rewrite (input: 原 stage + plan, output: 混合风格 stage)
 - [ ] **人标 30 集后**回头审计：stage 在相邻段的重复率？action 是否真的 ≤12 词？think 出现在多少 %？据此调整 §7 规范
-- [ ] **本 doc 跟 VLM prompt 同步**：[`README_qwen_vlm_for_teleop_annotation.md`](README_qwen_vlm_for_teleop_annotation.md) 的 system prompt 应该 reference 本 doc §7 而不是各自维护一套规则
+- [ ] **本 doc 跟 VLM prompt 同步**：[`README_prompt_engineering_spec.md`](README_prompt_engineering_spec.md) 引用本 doc §11 / §7 而不是各自维护一套规则
+
+---
+
+## 11. 架构升级：memory-augmented CoT（**这一节会颠覆前文部分推荐**）
+
+> 2026-05-24 用户澄清：模型架构是 **history-conditioned**（reasoning text 作为可携带的工作记忆），不是 Markovian。重新校正前文 §3 的 Markovian 推荐 + §7 的 stage 风格。
+
+### 11.1 架构对比
+
+```
+传统 Markovian VLA:
+    π(a_t | obs_t, prompt)
+
+我们的 history-conditioned VLA:
+    π(a_t | obs_t, prompt, reasoning_1..t-1)
+                              └─── reasoning 是 memory
+```
+
+reasoning text **替代了传统隐状态**：显式可解释、可被监督、跨步骤携带的"工作记忆"。
+
+§3 推荐的"stage 严格 Markovian、不引用 previous step"是**为 random-batch 训练**优化的。在 history-conditioned 架构下不再适用：
+
+- 训练时模型本来就**按时序看完整 reasoning chain**
+- 推理时模型能**显式引用过去的 reasoning** 决策
+
+所以 stage **不仅可以**、**应该**承载历史信息。
+
+### 11.2 关键标注原则：**"图像里看不到的，才是 memory 该写的"**
+
+| 信息 | 当前图像能否唯一推断 | 该写进 stage |
+|---|---|---|
+| 夹爪当前位置 / 物体位置 | ✅ | ❌ 冗余 |
+| 夹爪 open/closed | ✅ | ❌ 已有 gripper_state 字段 |
+| **这是第几次抓取**（已经放了一个 cube）| ❌ | ✅ **该写** |
+| **上一次抓失败了** | ❌ | ✅ **该写** |
+| **当前在 plan 的哪一步** | ❌ | ✅ **该写** |
+| 物体颜色、形状 | ✅ | ❌ 不必复述 |
+| 物体语义关系（target 为何是橙色）| ❌ | ✅ **该写** |
+
+**规则**：reasoning text 的价值 = 写出来的内容**不能从当前图像唯一推断**。
+
+### 11.3 Memory window 设计选项
+
+| 方案 | 描述 | 成本 | 信息丢失 |
+|---|---|---|---|
+| **Full history** | 把所有过往 reasoning 都喂进 context | O(N²) | 无 |
+| **Sliding window k** | 只看最近 k 段 reasoning | O(N·k) | 远期失忆 |
+| **Hierarchical** | plan const + running summary + last k 段细节 | O(N·k) | 中期被压缩 |
+| **Working memory dict** | 显式 key-value memory ("retries_attempted: 1", ...) | O(N·m) | 取决于 schema 完备性 |
+
+**当前选择（2026-05-24 用户确认）**：**Full history**，跑短任务先验证 pipeline。等任务变长（>15 keyframe / 集）再考虑滑窗或层次结构。
+
+### 11.4 think 字段在 memory 设定下的扩展
+
+原推荐："think 只在 retry 段填"（稀疏特殊信号）。
+
+新推荐（multi-objective 架构下，详见 §11.5）：
+
+| 何时填 think | 强制度 | 例子 |
+|---|---|---|
+| **retry / 失败恢复** | **必填** | "Previous grasp closed empty; realign and retry." |
+| **多步规划决策** | 选填 | "Picking the leftmost cube first to free up space for the others." |
+| **避障 / 路径选择** | 选填 | "Lifting higher than usual to clear the middle cube." |
+| **不可见信息推理** | 选填 | "The orange cube is the target because we've already placed cyan on the red." |
+
+目标 think 覆盖率：30-40% keyframe（vs 原推荐 5-15%）。
+
+**为什么放宽不会冲淡 retry 信号？** Multi-objective 架构用 **marker token**（`[think]`）显式触发推理路径，retry 必填只是保证"出错时一定有 think"，其它类的 think 用 marker 决定要不要 emit。详见 §11.5。
+
+### 11.5 多目标联合训练（2026-05-24 用户提出的三个目标）
+
+模型同时学三种生成：
+
+| 目标 | 数学 | 输出 marker |
+|---|---|---|
+| VQA (stage 描述) | $\hat{s}_{t+1} \sim P(s \mid o_{t+1}, a_{0..t}, \ell)$ | `[stage]` |
+| Policy (action) | $\hat{a}_{t+1} \sim P(a \mid o_{t+1}, a_{0..t}, \ell)$ | `[act]` |
+| Reason + act | $\hat{\ell}_{t+1}, \hat{a}_{t+1} \sim P(\ell, a \mid o_{t+1}, a_{0..t}, \ell)$ | `[think] ... [act]` |
+
+**会风格冲突吗？** 不会，前提是三个技巧：
+
+#### 技巧 1：显式 marker token 决定输出模式
+
+```
+[stage] The robot, having released the first cube on the red target, now hovers above the second cyan cube...
+[act] Lower onto the cube, close the gripper, and lift
+[think] The previous grasp failed; realign deeper. [act] Lower the gripper closer to the cube before closing.
+```
+
+类比：ECoT 用 `<task>...</task>` tag、OpenVLA 用 special token，同一套路。
+
+#### 技巧 2：训练 batch 混合比例
+
+| 模式 | 推荐比例 | 理由 |
+|---|---|---|
+| `[act]` 单出 action | 40-50% | 部署时最常用 |
+| `[think] [act]` 推理 + action | 20-30% | 教 chain reasoning |
+| `[stage]` VQA 描述 | 20-30% | 教 grounding + 历史综合 |
+| `[plan]` 整集规划 | 5-10% | 频率低，每集一次 |
+
+#### 技巧 3：think 标注密度跟 marker 触发匹配
+
+`[think]` 训练样本占 20-30%，那训练数据里 think 字段非空的 keyframe 也得有 20-30% 量。否则 multi-mode 模型 emit 时容易胡说。**所以 think 字段需要 §11.4 的"selectively dense"，从原 5-15% 提到 30-40%**。
+
+### 11.6 stage 跟 think 的边界（用户观察：两者很像）
+
+用户观察是对的。memory-augmented 后两者承载内容确有重叠。我倾向**保留分开**因为：
+
+| 字段 | 时间锚 | 主要内容 | marker 用途 |
+|---|---|---|---|
+| `stage` | 本段状态 + 简要历史 | "目前在哪 + 怎么走到这" | `[stage]` 触发 VQA 路径 |
+| `think` | 过去事件因果反思 + 当前决策依据 | "为什么这样做" | `[think]` 触发推理路径（**可被部署时关闭**节省延迟）|
+
+关键好处：`[think]` 是**可关闭的高成本路径**。实时部署可以 skip think 直接 `[act]`，需要复杂推理时（如失败恢复）才开 `[think]`。
+
+具体例 (retry):
+
+```json
+{
+  "stage": "Following a failed grasp where the gripper closed without securing the cube, the robot has reopened and realigned above the cyan cube.",
+  "think": "The first attempt closed before reaching the cube. Lowering the gripper deeper this time before closing should make contact.",
+  "action": "Lower deeper, then close to grasp"
+}
+```
+
+- stage = **事实**（failed grasp → realigned）
+- think = **推理**（why happened + how to fix）
+- action = **意图**
+
+### 11.7 训练采样策略：full-episode AR vs prefix-cutoff
+
+| 维度 | full-episode AR | prefix-cutoff |
+|---|---|---|
+| batch sample | 一整集 | 随机切到 t 的前缀 |
+| 梯度流 | 整集一图，跨 step 累计 | 每个 t 独立 forward |
+| early-step 暴露 | 早 step 在每集都被看 → "免费多采样" | 早晚均匀 |
+| GPU 占用 | 长集易 OOM（K 张图 encode）| 定长可控 |
+| batch packing | 难（变长） | 易 |
+| 类比 RNN | full BPTT | truncated BPTT |
+
+**当前选择（2026-05-24 用户确认）**：短任务 + full memory → **full-episode AR**。短任务下不会 OOM，梯度信号也最完整。
+
+任务变长后的迁移路径：
+- **方案 A**：滑窗截断到最近 K 段（hybrid）
+- **方案 B**：换 prefix-cutoff，每集采若干 t
+
+### 11.8 §11 总结：对前文规范的修订
+
+| §7 原推荐 | §11 修订后 |
+|---|---|
+| stage 不引用 previous step | **stage 应该编码图像看不出的历史进度** |
+| think 只在 retry 段填（5-15%） | **think 在 retry 必填 + 其它非显然决策选填（30-40%）** |
+| stage 15-30 词 | **15-40 词**（多 10 词留给历史摘要） |
+| 训练随机采样 keyframe 进 batch | **训练按 episode 时序采样（full-AR 或 prefix-cutoff）** |
+| 单一 action 输出 | **multi-objective 用 marker token (`[stage]`/`[act]`/`[think]`) 切换** |
+
+### 11.9 §11 落地 action items
+
+- [ ] 更新 [`README_prompt_engineering_spec.md`](README_prompt_engineering_spec.md) 的 system prompt 反映 marker token 设计
+- [ ] 更新 [`scripts/annotate_teleop_episodes.py`](../../../scripts/annotate_teleop_episodes.py) 的 GUI placeholder 文本（鼓励 stage 写历史进度）
+- [ ] 写训练 dataset class：从 cot_annotations JSON 输出 (image_t, history_text, action_t) 三元组 + 模式 marker
+- [ ] decide on 训练时 marker 注入位置（system prompt 还是 assistant prefix）

@@ -55,7 +55,7 @@ def main() -> int:
                     help="MiMo API base URL")
     ap.add_argument("--model", default="mimo-v2.5")
     ap.add_argument("--temperature", type=float, default=0.2)
-    ap.add_argument("--max-completion-tokens", type=int, default=2048)
+    ap.add_argument("--max-completion-tokens", type=int, default=4096)
     ap.add_argument("--request-timeout-s", type=float, default=300.0)
 
     ap.add_argument("--no-resume", action="store_true")

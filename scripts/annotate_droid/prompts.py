@@ -106,7 +106,7 @@ HARD RULES:
 
   R5. think non-null on every type=retry keyframe (audit will reject).
 
-  R6 (action vocabulary — strict, two-tier):
+  R6 (action vocabulary — three tiers; the key is WHEN to use numbers):
 
     TIER A — grasp / release / retry keyframes:
       The grip verb (close / open / release / re-grasp / pick) takes
@@ -116,23 +116,42 @@ HARD RULES:
         ✓ "Close the gripper to grasp the marker"
         ✓ "Close the gripper to grasp the marker while pitching down 4°"
         ✗ "Yaw slightly while moving closer to the sink"        (release frame)
-        ✗ "Position the pen on the table surface"                (release frame)
         ✗ "Pitch downward and move closer to the cube"           (grasp frame)
 
-    TIER B — motion / filler / begin / end keyframes:
-      USE AXIS-AWARE VOCABULARY by default. The Δxyz/Δrot in the input
-      tells you exactly which axis dominates — name it and the magnitude.
-      Use "slightly" / "marginally" / "a bit" for small deltas
-      (≤2cm or ≤5°) and explicit numbers for larger ones.
-        ✓ "Translate forward 5 cm to approach the candy bar"
-        ✓ "Yaw counterclockwise 12° to align with the marker"
-        ✓ "Lower 1 cm and tilt downward slightly"
-        ✓ "Pitch downward 8° while lifting the sachet higher"
-        ✗ "Adjust the arm's position"                  (no axis name)
-        ✗ "Fine-tune position for optimal grasp"       (no axis name)
-        ✗ "Move closer to the cube"                    (no axis name)
-      You may still write "Move forward / lower / lift" but you must add
-      the axis qualifier and ideally the magnitude. Never say only "adjust".
+    TIER B — FINE-TUNING motion keyframes
+      (the gripper is alignING with a target: the keyframe immediately
+      BEFORE a grasp/release, OR a small-Δ keyframe within a couple
+      seconds of one. The gripper is making precise corrections.):
+        USE precise numeric axis vocab — the magnitude actually matters
+        for downstream policy:
+          ✓ "Lower 2 cm and yaw 5° to align with the cube"
+          ✓ "Tilt downward 8° to face the marker squarely"
+          ✓ "Translate forward 1 cm to seat the gripper on the candy"
+
+    TIER C — TRANSPORT / APPROACH / RETRACT motion keyframes
+      (most motion keyframes — the gripper is moving FREELY between
+      objects or scene regions, not aligning with a specific target.
+      The keyframe-to-keyframe Δ here is just one sample of continuous
+      motion — the trajectory between samples is not a commanded
+      waypoint. Numeric precision (e.g. "12.4 cm") becomes a
+      hallucination of intent that wasn't there.):
+        Prefer QUALITATIVE descriptions of direction + scene relation:
+          ✓ "Lift the cube high and arc toward the towel"
+          ✓ "Approach the marker from above the table"
+          ✓ "Carry the Doritos sideways toward the sink basin"
+          ✓ "Retract upward away from the workspace"
+        You MAY name an axis without a number when one axis clearly
+        dominates the motion ("Lift higher while yawing toward the
+        pot"). Avoid bare numbers like "translate 12 cm" — they
+        over-claim intent.
+        NEVER write only "adjust the arm" — you must say WHICH
+        direction and WHAT object it's relative to.
+
+    Heuristic for deciding TIER B vs C:
+      - Is the next or previous keyframe a grasp/release/retry? → TIER B
+      - Is Δxyz very small (≤2 cm in every axis) AND we're near a grasp
+        moment? → TIER B
+      - Otherwise default to TIER C (qualitative, possibly axis-named).
 
   R7. No negative reasoning ("the robot did NOT…"). Describe what is.
 
@@ -140,9 +159,28 @@ HARD RULES:
 
   R9. Δxyz / Δrot semantics: the values describe the motion that happens
       BETWEEN this keyframe and the NEXT keyframe (forward-looking, in
-      the direction of time). Your `action` describes the same motion —
-      so an axis-named action reads as a faithful caption of the upcoming
-      segment. The last keyframe in the episode has Δ=zero by definition.
+      the direction of time). For TIER B (fine-tuning) the Δ is close
+      to a commanded waypoint and is informative. For TIER C (transport)
+      the Δ is incidental sampling — use it only to pick the dominant
+      axis name, not to copy specific numbers into `action`.
+
+  R10 (NEW — stage style refinements):
+
+    R10a. `stage` MUST NOT contain numeric pose data (cm / ° / "10 cm").
+          Numbers belong in `action` for TIER B keyframes; `stage` is
+          natural-language scene description + history.
+          ✗ "Carrying the Doritos 22cm sideways toward the sink basin."
+          ✓ "Carrying the Doritos sideways toward the sink basin, the
+             gripper passes over the counter edge."
+
+    R10b. Plan-step references in stage are OPTIONAL, not encouraged.
+          Prefer describing the robot's current relationship to scene
+          objects in natural language; only invoke "plan step N" when
+          it carries image-invisible info (failure recovery, counters,
+          which-attempt-is-this).
+          ✗ "Plan step 4 transport phase: the robot moves toward the sink."
+          ✓ "Having grasped the Doritos, the gripper rises and arcs
+             over the counter edge toward the sink basin."
 """
 
 
@@ -357,62 +395,72 @@ FEWSHOT_V3_ASSISTANT = {
         "3) Close around the cube. 4) Lift and carry it over the towel. "
         "5) Release. 6) Retract."
     ),
+    # Style notes (NOT part of output — just for the model to internalize):
+    #   - TIER A (grasp/release): grip verb only, no numbers in action
+    #   - TIER B (the keyframe just before grasp/release, gripper aligning):
+    #       precise numeric axis action
+    #   - TIER C (transport / approach / retract — most motion frames):
+    #       qualitative axis name + scene relation, NO bare numbers
+    #   - stage: natural-language scene description; references prior events
+    #       implicitly ("Having grasped..."), avoids "Plan step N", NO numerics
     "keyframes": [
         {
             "frame_idx": 0,
             "mode_marker": "[think_act]",
-            "stage": "Start of the episode. The robot begins at its ready pose above the workspace; plan step 1 (approach) is about to start.",
+            # stage: scene relation, NO numerics, NO "plan step 1"
+            "stage": "The episode starts with the gripper hovering at its ready pose above the table, oriented downward and beginning its descent toward the blue cube.",
             "think": None,
-            # large lateral motion (3.2cm forward, 1.5cm down) → use axis names + numbers
-            "action": "Translate forward 3 cm and lower 1.5 cm toward the cube.",
+            # TIER C — transport / approach: qualitative direction + scene relation
+            "action": "Approach the blue cube while lowering toward the table.",
         },
         {
             "frame_idx": 22,
             "mode_marker": "[think_act]",
-            "stage": "Continuing plan step 1, the gripper has approached the cube laterally and is now descending sharply toward it.",
+            "stage": "The gripper has crossed most of the way to the cube and is now descending more sharply, closing in for the pre-grasp pose.",
             "think": None,
-            # z dominant (-6.8cm)
-            "action": "Lower 7 cm to the pre-grasp pose above the cube.",
+            # TIER C — transport, dominant z descent; mention axis but no number
+            "action": "Continue lowering toward the pre-grasp pose above the cube.",
         },
         {
             "frame_idx": 41,
             "mode_marker": "[think_act]",
-            "stage": "Final pre-grasp alignment: the gripper has reached the cube's height and is rotating its jaws to match the cube's edge orientation.",
+            "stage": "The gripper has reached the cube's height and is rotating its jaws to match the cube's edge orientation just before closing.",
             "think": None,
-            # tiny xyz, dominant yaw rotation
+            # TIER B — pre-grasp alignment: precise axis + number
             "action": "Yaw counterclockwise 11° to align jaws with the cube.",
         },
         {
             "frame_idx": 55,
             "mode_marker": "[think_act]",
-            "stage": "Plan step 3: the gripper closes around the blue cube. Approach phase complete on first attempt.",
+            # stage references prior alignment implicitly, no "plan step 3"
+            "stage": "Having aligned its jaws with the cube, the gripper now closes around it for a firm grasp.",
             "think": None,
-            # GRASP keyframe — grip verb wins, pose qualifier optional
+            # TIER A — grasp: grip verb, no pose details
             "action": "Close the gripper to grasp the blue cube.",
         },
         {
             "frame_idx": 80,
             "mode_marker": "[think_act]",
-            "stage": "Having grasped the cube, the robot lifts and carries it leftward and upward toward the towel area. Plan step 4 transport phase.",
+            # stage describes scene relation post-grasp, no numerics
+            "stage": "Having grasped the cube, the robot lifts it well above the workspace and arcs it leftward over the table toward the towel.",
             "think": None,
-            # mixed lateral + up motion
-            "action": "Translate leftward 5 cm while lifting 6 cm toward the towel.",
+            # TIER C — transport: scene-relational, mentions axis names without numbers
+            "action": "Lift the cube and arc leftward over the table toward the towel.",
         },
         {
             "frame_idx": 105,
             "mode_marker": "[think_act]",
-            "stage": "Plan step 5: the gripper opens to place the cube on the towel.",
+            "stage": "Now positioned directly above the towel, the gripper opens to place the cube onto the cloth.",
             "think": None,
-            # RELEASE keyframe — grip verb wins
+            # TIER A — release: grip verb
             "action": "Open the gripper to release the cube onto the towel.",
         },
         {
             "frame_idx": 124,
             "mode_marker": "[think_act]",
-            "stage": "Episode complete. The robot is stationary at its release pose.",
+            "stage": "Task complete. The gripper rests above the towel, with the cube resting on the cloth below.",
             "think": None,
-            # zero delta — say "remain" or "settle"
-            "action": "Remain stationary at the release pose.",
+            "action": "Remain at the release pose above the towel.",
         },
     ],
 }

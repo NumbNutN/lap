@@ -47,7 +47,10 @@ class MiMoClient:
         base_url: str = DEFAULT_BASE_URL,
         model: str = "mimo-v2.5",
         request_timeout_s: float = 300.0,
-        max_completion_tokens: int = 2048,
+        # 4096 (was 2048): long DROID episodes (15+ keyframes) can exceed
+        # 2k JSON tokens once stage + action + think are full-bodied;
+        # truncation is a major MiMo failure mode (parse error).
+        max_completion_tokens: int = 4096,
         temperature: float = 0.2,
         top_p: float = 0.9,
     ):

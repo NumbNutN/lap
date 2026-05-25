@@ -126,6 +126,7 @@ class EpisodeAnnotation:
 
 
 _MD_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_MD_FENCE_OPEN_RE = re.compile(r"```(?:json)?\s*", re.IGNORECASE)
 
 
 class VlmOutputParseError(ValueError):
@@ -133,19 +134,40 @@ class VlmOutputParseError(ValueError):
 
 
 def _strip_markdown_fence(s: str) -> str:
-    """If the VLM wrapped the JSON in ```json ... ```, extract the inside."""
-    m = _MD_FENCE_RE.search(s)
+    """Strip markdown fence wrappers (multiple variations).
+
+    Handles:
+      - ```json ... ``` (perfectly balanced fences)
+      - ``` ... ```
+      - Leading prose then ```json ... no closing fence
+      - Multiple fences (takes the LARGEST inner block, which is usually the
+        full JSON; smaller blocks may be inline string examples)
+    """
+    # First try balanced fence(s); pick the largest match (usually the full
+    # JSON; smaller matches are inline string examples like ``"```json"``).
+    matches = _MD_FENCE_RE.findall(s)
+    if matches:
+        return max(matches, key=len)
+    # Second: if there's an opening ```json but no closing fence (e.g.
+    # truncated reply), strip the opening and let downstream parsers
+    # handle whatever's left.
+    m = _MD_FENCE_OPEN_RE.search(s)
     if m:
-        return m.group(1)
+        return s[m.end():]
     return s
 
 
-def _find_outer_object(s: str) -> str:
+def _find_outer_object(s: str, *, allow_truncated: bool = False) -> str:
     """Return the substring from the first '{' to its matching '}' inclusive.
 
     Handles cases where the VLM appended prose after the JSON (commentary)
     or prefixed it with a header line. Naive brace-counting; trips on
     string-literal braces which is acceptable for our schema (no such braces).
+
+    When ``allow_truncated`` is True and the reply is missing closing braces,
+    we close them ourselves and return the patched substring — the JSON
+    parser can then salvage as many complete keyframes as possible by
+    truncating the last incomplete array element.
     """
     start = s.find("{")
     if start < 0:
@@ -153,6 +175,7 @@ def _find_outer_object(s: str) -> str:
     depth = 0
     in_str = False
     esc = False
+    last_complete = -1  # offset of the last position where depth returned to 0
     for i in range(start, len(s)):
         c = s[i]
         if esc:
@@ -172,7 +195,50 @@ def _find_outer_object(s: str) -> str:
             depth -= 1
             if depth == 0:
                 return s[start:i + 1]
-    raise VlmOutputParseError("unbalanced braces in VLM output")
+    # Unbalanced — see if we can recover by closing braces.
+    if not allow_truncated:
+        raise VlmOutputParseError("unbalanced braces in VLM output")
+    # Best-effort recovery: trim the substring to the last position where
+    # we were inside an array (looking for the last complete ``},`` or
+    # ``}``), then close all open braces.
+    snippet = s[start:]
+    # Strip trailing junk back to a position where the next char is ``,``
+    # or where the depth was reduceable. Simple heuristic: find the last
+    # ``}`` and assume the array continues afterwards.
+    last_brace = snippet.rfind("}")
+    if last_brace < 0:
+        raise VlmOutputParseError("unbalanced braces + no closing braces at all")
+    # Walk forward up to last_brace, count depth, then close.
+    depth = 0
+    in_str = False
+    esc = False
+    for i, c in enumerate(snippet[:last_brace + 1]):
+        if esc:
+            esc = False
+            continue
+        if c == "\\" and in_str:
+            esc = True
+            continue
+        if c == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+    if depth <= 0:
+        return snippet[:last_brace + 1]
+    # Close remaining open braces — also may need to close an open
+    # array. We accept that the last keyframe in the array may have
+    # been truncated; close it.
+    patch = snippet[:last_brace + 1]
+    # If we are inside an array (typical: keyframes: [ {...}, {...}, {...
+    # truncated]), the depth here is 1 for the outer object + array brackets
+    # not counted. Just add closing braces equal to depth.
+    patch = patch + "]" + "}" * depth
+    return patch
 
 
 def parse_vlm_output(text: str) -> tuple[str, list[KeyframeAnnotation]]:
@@ -181,16 +247,49 @@ def parse_vlm_output(text: str) -> tuple[str, list[KeyframeAnnotation]]:
     Raises VlmOutputParseError with a short reason if the reply can't be
     coerced into the schema. Caller should record the raw output for
     debugging when this raises.
+
+    Recovery order:
+      1. Strip markdown fence (multiple variations).
+      2. Find outer ``{ ... }`` with brace-counting.
+      3. ``json.loads``.
+      4. If unbalanced braces / decode fails, try aggressive recovery:
+         close braces, strip trailing partial keyframe, retry.
     """
     if not text or not text.strip():
         raise VlmOutputParseError("empty VLM output")
 
     candidate = _strip_markdown_fence(text)
-    candidate = _find_outer_object(candidate)
     try:
-        d = json.loads(candidate)
-    except json.JSONDecodeError as e:
-        raise VlmOutputParseError(f"JSON decode failed: {e.msg}") from e
+        outer = _find_outer_object(candidate, allow_truncated=False)
+        d = json.loads(outer)
+    except (VlmOutputParseError, json.JSONDecodeError) as e_strict:
+        # Try truncation recovery — handle the MiMo "unbalanced braces"
+        # case where the reply was cut off mid-keyframe.
+        try:
+            outer = _find_outer_object(candidate, allow_truncated=True)
+            d = json.loads(outer)
+        except (VlmOutputParseError, json.JSONDecodeError) as e_loose:
+            # Last attempt: trim partial keyframe at the end before
+            # closing braces. The pattern is usually:
+            #   "keyframes": [ {...}, {...}, {"frame_idx": 50, "stag
+            # We trim from the last complete ``},`` back to the last
+            # complete ``}`` and close.
+            idx = candidate.rfind("},")
+            if idx > 0:
+                trimmed = candidate[:idx + 1]  # keep through ``}``
+                # close array + outer object
+                trimmed += "]}"
+                try:
+                    d = json.loads(trimmed)
+                except json.JSONDecodeError as e_final:
+                    raise VlmOutputParseError(
+                        f"JSON decode failed even with truncation recovery: "
+                        f"strict={e_strict}; loose={e_loose}; final={e_final.msg}"
+                    ) from e_final
+            else:
+                raise VlmOutputParseError(
+                    f"could not recover JSON: strict={e_strict}; loose={e_loose}"
+                ) from e_loose
 
     if not isinstance(d, dict):
         raise VlmOutputParseError("top-level JSON is not an object")

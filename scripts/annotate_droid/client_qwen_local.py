@@ -165,16 +165,24 @@ class QwenVLLocalClient:
         """
         from PIL import Image
         from .prompts import _select_system_prompt
+        from .prompts import build_fewshot_v3_user_text, build_fewshot_v3_assistant_text
 
         system_prompt = _select_system_prompt(feed_types, memory_augmented)
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
         ]
-        if include_fewshot and feed_types and not memory_augmented:
-            # Fewshot is built around the v1 types-fed schema; skip it in
-            # no-types and v3 modes to avoid biasing the VLM with examples
-            # that don't match the requested output shape.
+        if include_fewshot and feed_types and memory_augmented:
+            # v3 axis-aware text-only fewshot (no images yet — keeps
+            # token cost low). Demonstrates BOTH small-delta and
+            # large-delta axis-aware action patterns.
+            messages.append({"role": "user", "content": [
+                {"type": "text", "text": build_fewshot_v3_user_text()},
+            ]})
+            messages.append({"role": "assistant", "content": [
+                {"type": "text", "text": build_fewshot_v3_assistant_text()},
+            ]})
+        elif include_fewshot and feed_types:
             messages.append({"role": "user", "content": [
                 {"type": "text", "text": build_fewshot_user_text()},
             ]})

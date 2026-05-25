@@ -28,6 +28,18 @@ from .schema import EpisodeAnnotation
 from .schema import KeyframeAnnotation
 
 
+# A9 axis-aware coverage threshold: at least this fraction of a v3
+# episode's `motion`-type keyframes should mention an axis name (yaw /
+# pitch / roll / cm / °). Below this, the episode looks "coarse" and is
+# inconsistent with the rest of the dataset. Warning, not error.
+_AXIS_AWARE_PAT = re.compile(
+    r"\b(yaw|pitch|roll|cm|°|degrees?|translate|tilt|rotate)\b",
+    re.IGNORECASE,
+)
+_AXIS_AWARE_MIN_RATE_MOTION = 0.30   # 30% of motion keyframes
+_AXIS_AWARE_MIN_RATE_ANY = 0.20      # 20% of all keyframes
+
+
 # Phrasing whitelists used for A3 / R2-R3 (positive constraint at grasp /
 # release keyframes — these MUST mention grasping / releasing).
 GRASP_VERBS = {"close", "grasp", "grip", "clamp", "squeeze", "pinch", "pick"}
@@ -175,6 +187,45 @@ def audit_episode(
                     f"A8 keyframes[{i}] (type={kf_type}) gripper open but "
                     f"action says it is closing: {kf.action!r}"
                 )
+
+    # A9: axis-aware action coverage (v3 memory-augmented mode only).
+    # When the input keyframe meta carried pose deltas, the VLM was
+    # explicitly asked to use axis-aware vocab. If almost no keyframe
+    # mentions an axis, the model defaulted to coarse "adjust position"
+    # phrasing — warn the operator so they can decide whether to
+    # re-prompt or accept the episode. This is a STYLE check, not a
+    # correctness check, so it's a warning even if all motion keyframes
+    # lack axis vocab.
+    if expected_keyframe_types is not None and len(expected_keyframe_types) == len(ann.keyframes):
+        motion_kfs = [
+            (kf, t) for kf, t in zip(ann.keyframes, expected_keyframe_types, strict=True)
+            if t in {"motion", "filler", "begin", "end"}
+        ]
+        if motion_kfs:
+            n_motion_axis = sum(
+                1 for kf, _ in motion_kfs
+                if _AXIS_AWARE_PAT.search(kf.action or "")
+            )
+            rate_motion = n_motion_axis / len(motion_kfs)
+            if rate_motion < _AXIS_AWARE_MIN_RATE_MOTION:
+                report.warnings.append(
+                    f"A9 axis-aware vocab coverage on motion keyframes: "
+                    f"{n_motion_axis}/{len(motion_kfs)} = {rate_motion*100:.0f}% "
+                    f"(threshold {_AXIS_AWARE_MIN_RATE_MOTION*100:.0f}%). "
+                    f"Episode reads as coarse; consider re-prompting."
+                )
+
+        n_any_axis = sum(
+            1 for kf in ann.keyframes
+            if _AXIS_AWARE_PAT.search(kf.action or "")
+        )
+        rate_any = n_any_axis / max(1, len(ann.keyframes))
+        if rate_any < _AXIS_AWARE_MIN_RATE_ANY:
+            report.warnings.append(
+                f"A9 axis-aware vocab coverage overall: "
+                f"{n_any_axis}/{len(ann.keyframes)} = {rate_any*100:.0f}% "
+                f"(threshold {_AXIS_AWARE_MIN_RATE_ANY*100:.0f}%)."
+            )
 
     report.passed = not report.errors
     return report

@@ -71,18 +71,23 @@ def annotate_episode(
     if not keyframes:
         return _failure(bundle, "no keyframes detected", "")
 
-    # 2. Compute per-keyframe pose deltas (vs prior keyframe) — only when
-    #    we have full 6-DoF pose data AND the user opted into memory mode.
+    # 2. Compute per-keyframe FORWARD pose deltas (this keyframe → next
+    #    keyframe) — only when we have full 6-DoF pose data AND the user
+    #    opted into memory mode. Forward direction is intentional: the
+    #    `action` field describes the motion the robot is ABOUT TO
+    #    execute, so the delta we surface in the prompt should describe
+    #    the same upcoming segment. Last keyframe has Δ=zero (nothing
+    #    after it).
     pose_deltas_str: list[str] = ["" for _ in keyframes]
     if memory_augmented and bundle.ee_pose is not None:
         from .pose_utils import pose_delta
         for i, kf in enumerate(keyframes):
             cur_pose = bundle.ee_pose[kf.t]
-            if i == 0:
-                prev_pose = bundle.ee_pose[0]
+            if i + 1 < len(keyframes):
+                next_pose = bundle.ee_pose[keyframes[i + 1].t]
             else:
-                prev_pose = bundle.ee_pose[keyframes[i - 1].t]
-            d = pose_delta(cur_pose, prev_pose)
+                next_pose = cur_pose  # last keyframe — Δ = 0
+            d = pose_delta(next_pose, cur_pose)
             pose_deltas_str[i] = str(d)
 
     # 3. Build VLM-ready metadata + lazy-load images for selected frames

@@ -59,8 +59,14 @@ def main() -> int:
     ap.add_argument("--request-timeout-s", type=float, default=300.0)
 
     ap.add_argument("--no-resume", action="store_true")
+    ap.add_argument("--no-feed-types", action="store_true",
+                    help="don't feed detector types to VLM (mode B)")
+    ap.add_argument("--memory-augmented", action="store_true",
+                    help="use v3 prompt (memory + axis-aware + mode_marker)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
+    if args.memory_augmented and args.no_feed_types:
+        ap.error("--memory-augmented requires types fed")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -95,6 +101,8 @@ def main() -> int:
         bundles, client,
         output_jsonl=args.output,
         resume=not args.no_resume,
+        feed_types=not args.no_feed_types,
+        memory_augmented=args.memory_augmented,
     )
     print(f"\nDone. emitted={counts['emitted']} skipped={counts['skipped']} "
           f"failed={counts['failed']}")

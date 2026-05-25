@@ -106,14 +106,43 @@ HARD RULES:
 
   R5. think non-null on every type=retry keyframe (audit will reject).
 
-  R6. action verb / direction should match the Δxyz/Δrot signal when one
-      stands out. Example: if Δrot is "12° yaw", action should mention
-      yaw rotation; if Δxyz dominates (e.g. -8cm z = lowering), action
-      should mention "lower" / "z descent".
+  R6 (action vocabulary — strict, two-tier):
+
+    TIER A — grasp / release / retry keyframes:
+      The grip verb (close / open / release / re-grasp / pick) takes
+      ABSOLUTE PRIORITY over pose delta in `action`. Always start the
+      sentence with the grip verb. You MAY add a pose qualifier in a
+      subordinate clause IF it fits within 12 words.
+        ✓ "Close the gripper to grasp the marker"
+        ✓ "Close the gripper to grasp the marker while pitching down 4°"
+        ✗ "Yaw slightly while moving closer to the sink"        (release frame)
+        ✗ "Position the pen on the table surface"                (release frame)
+        ✗ "Pitch downward and move closer to the cube"           (grasp frame)
+
+    TIER B — motion / filler / begin / end keyframes:
+      USE AXIS-AWARE VOCABULARY by default. The Δxyz/Δrot in the input
+      tells you exactly which axis dominates — name it and the magnitude.
+      Use "slightly" / "marginally" / "a bit" for small deltas
+      (≤2cm or ≤5°) and explicit numbers for larger ones.
+        ✓ "Translate forward 5 cm to approach the candy bar"
+        ✓ "Yaw counterclockwise 12° to align with the marker"
+        ✓ "Lower 1 cm and tilt downward slightly"
+        ✓ "Pitch downward 8° while lifting the sachet higher"
+        ✗ "Adjust the arm's position"                  (no axis name)
+        ✗ "Fine-tune position for optimal grasp"       (no axis name)
+        ✗ "Move closer to the cube"                    (no axis name)
+      You may still write "Move forward / lower / lift" but you must add
+      the axis qualifier and ideally the magnitude. Never say only "adjust".
 
   R7. No negative reasoning ("the robot did NOT…"). Describe what is.
 
   R8. Plan ≤ 5 sentences. Stage ≤ 40 words. Action ≤ 12 words.
+
+  R9. Δxyz / Δrot semantics: the values describe the motion that happens
+      BETWEEN this keyframe and the NEXT keyframe (forward-looking, in
+      the direction of time). Your `action` describes the same motion —
+      so an axis-named action reads as a faithful caption of the upcoming
+      segment. The last keyframe in the episode has Δ=zero by definition.
 """
 
 
@@ -293,6 +322,114 @@ FEWSHOT_USER = {
     ],
 }
 
+
+# ---------------------------------------------------------------------------
+# v3 fewshot — memory-augmented + axis-aware, demonstrates BOTH small and
+# large deltas to nudge the model away from "Adjust position" on small ones.
+# ---------------------------------------------------------------------------
+
+
+FEWSHOT_V3_USER = {
+    "task_instruction": "Pick up the blue cube and place it on the towel",
+    "keyframes_meta": [
+        {"frame_idx": 0,   "type": "begin",   "gripper_state": "open",
+         "pose_delta_str": "Δxyz=(+3.2cm,-1.1cm,-1.5cm)  Δrot=4° around -yaw"},
+        {"frame_idx": 22,  "type": "motion",  "gripper_state": "open",
+         "pose_delta_str": "Δxyz=(+1.0cm,-0.4cm,-6.8cm)  Δrot=2° around pitch"},
+        {"frame_idx": 41,  "type": "motion",  "gripper_state": "open",
+         "pose_delta_str": "Δxyz=(+0.3cm,-0.2cm,-0.4cm)  Δrot=11° around -yaw"},
+        {"frame_idx": 55,  "type": "grasp",   "gripper_state": "closed",
+         "pose_delta_str": "Δxyz=(+0.2cm,+0.1cm,+0.0cm)  Δrot=3° around pitch"},
+        {"frame_idx": 80,  "type": "motion",  "gripper_state": "closed",
+         "pose_delta_str": "Δxyz=(-2.4cm,+4.8cm,+5.6cm)  Δrot=6° around yaw"},
+        {"frame_idx": 105, "type": "release", "gripper_state": "open",
+         "pose_delta_str": "Δxyz=(+0.5cm,-0.1cm,-0.2cm)  Δrot=1° around pitch"},
+        {"frame_idx": 124, "type": "end",     "gripper_state": "open",
+         "pose_delta_str": "Δxyz=(+0.0cm,+0.0cm,+0.0cm)  Δrot=0° around yaw"},
+    ],
+}
+
+
+FEWSHOT_V3_ASSISTANT = {
+    "plan": (
+        "The robot picks up the blue cube and places it on the towel. "
+        "1) Approach the cube. 2) Lower and align the gripper. "
+        "3) Close around the cube. 4) Lift and carry it over the towel. "
+        "5) Release. 6) Retract."
+    ),
+    "keyframes": [
+        {
+            "frame_idx": 0,
+            "mode_marker": "[think_act]",
+            "stage": "Start of the episode. The robot begins at its ready pose above the workspace; plan step 1 (approach) is about to start.",
+            "think": None,
+            # large lateral motion (3.2cm forward, 1.5cm down) → use axis names + numbers
+            "action": "Translate forward 3 cm and lower 1.5 cm toward the cube.",
+        },
+        {
+            "frame_idx": 22,
+            "mode_marker": "[think_act]",
+            "stage": "Continuing plan step 1, the gripper has approached the cube laterally and is now descending sharply toward it.",
+            "think": None,
+            # z dominant (-6.8cm)
+            "action": "Lower 7 cm to the pre-grasp pose above the cube.",
+        },
+        {
+            "frame_idx": 41,
+            "mode_marker": "[think_act]",
+            "stage": "Final pre-grasp alignment: the gripper has reached the cube's height and is rotating its jaws to match the cube's edge orientation.",
+            "think": None,
+            # tiny xyz, dominant yaw rotation
+            "action": "Yaw counterclockwise 11° to align jaws with the cube.",
+        },
+        {
+            "frame_idx": 55,
+            "mode_marker": "[think_act]",
+            "stage": "Plan step 3: the gripper closes around the blue cube. Approach phase complete on first attempt.",
+            "think": None,
+            # GRASP keyframe — grip verb wins, pose qualifier optional
+            "action": "Close the gripper to grasp the blue cube.",
+        },
+        {
+            "frame_idx": 80,
+            "mode_marker": "[think_act]",
+            "stage": "Having grasped the cube, the robot lifts and carries it leftward and upward toward the towel area. Plan step 4 transport phase.",
+            "think": None,
+            # mixed lateral + up motion
+            "action": "Translate leftward 5 cm while lifting 6 cm toward the towel.",
+        },
+        {
+            "frame_idx": 105,
+            "mode_marker": "[think_act]",
+            "stage": "Plan step 5: the gripper opens to place the cube on the towel.",
+            "think": None,
+            # RELEASE keyframe — grip verb wins
+            "action": "Open the gripper to release the cube onto the towel.",
+        },
+        {
+            "frame_idx": 124,
+            "mode_marker": "[think_act]",
+            "stage": "Episode complete. The robot is stationary at its release pose.",
+            "think": None,
+            # zero delta — say "remain" or "settle"
+            "action": "Remain stationary at the release pose.",
+        },
+    ],
+}
+
+
+def build_fewshot_v3_user_text() -> str:
+    return build_user_text(
+        task_instruction=FEWSHOT_V3_USER["task_instruction"],
+        keyframes_meta=FEWSHOT_V3_USER["keyframes_meta"],
+        feed_types=True,
+        memory_augmented=True,
+    )
+
+
+def build_fewshot_v3_assistant_text() -> str:
+    return json.dumps(FEWSHOT_V3_ASSISTANT, ensure_ascii=False, indent=2)
+
 FEWSHOT_ASSISTANT = {
     "plan": (
         "Move the watermelon onto the towel. Steps: 1) approach the "
@@ -454,9 +591,13 @@ def build_openai_messages(
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
     ]
-    # Skip fewshot for v3 memory-augmented + no-types modes (their schema
-    # differs from the v1 fewshot and would bias outputs).
-    if include_fewshot and feed_types and not memory_augmented:
+    if include_fewshot and feed_types and memory_augmented:
+        # v3 fewshot: text-only, demonstrates axis-aware action vocab on
+        # BOTH small and large pose deltas (so model doesn't default to
+        # "Adjust position" on small ones).
+        messages.append({"role": "user", "content": build_fewshot_v3_user_text()})
+        messages.append({"role": "assistant", "content": build_fewshot_v3_assistant_text()})
+    elif include_fewshot and feed_types:
         messages.append({"role": "user", "content": build_fewshot_user_text()})
         messages.append({"role": "assistant", "content": build_fewshot_assistant_text()})
 
@@ -490,7 +631,10 @@ def build_gemini_contents(
 ) -> tuple[str, list[Any]]:
     """Build Gemini ``contents`` argument. Returns (system_instruction, contents)."""
     contents: list[Any] = []
-    if include_fewshot and feed_types and not memory_augmented:
+    if include_fewshot and feed_types and memory_augmented:
+        contents.append({"role": "user", "parts": [{"text": build_fewshot_v3_user_text()}]})
+        contents.append({"role": "model", "parts": [{"text": build_fewshot_v3_assistant_text()}]})
+    elif include_fewshot and feed_types:
         contents.append({"role": "user", "parts": [{"text": build_fewshot_user_text()}]})
         contents.append({"role": "model", "parts": [{"text": build_fewshot_assistant_text()}]})
 

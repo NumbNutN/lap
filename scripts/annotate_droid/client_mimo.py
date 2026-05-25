@@ -116,7 +116,33 @@ class MiMoClient:
         latency = time.monotonic() - t0
 
         choice = resp.choices[0]
-        text = choice.message.content or ""
+        msg = choice.message
+        # Pull text. Some Chinese OpenAI-compatible APIs (e.g. MiMo, DeepSeek-R1)
+        # return the answer in `reasoning_content` instead of `content` when
+        # the model does internal CoT. Fall back gracefully.
+        text = (getattr(msg, "content", None) or "").strip()
+        if not text:
+            text = (getattr(msg, "reasoning_content", None) or "").strip()
+        if not text:
+            # Last-ditch: dump entire message dict for debugging
+            try:
+                raw = msg.model_dump() if hasattr(msg, "model_dump") else str(msg)
+            except Exception:
+                raw = str(msg)
+            # Empty response is an error condition for the runner; emit a
+            # signal-bearing string so runner logs the actual failure mode
+            # rather than the silent "VLM failed after retries: ".
+            text = ""
+            # Attach debug context as a side-channel via exception below.
+            usage = getattr(resp, "usage", None)
+            in_tok = getattr(usage, "prompt_tokens", None) if usage else None
+            out_tok = getattr(usage, "completion_tokens", None) if usage else None
+            raise RuntimeError(
+                f"MiMo returned empty content+reasoning_content "
+                f"(finish_reason={choice.finish_reason!r} "
+                f"in_tok={in_tok} out_tok={out_tok}). "
+                f"Raw msg head: {str(raw)[:200]}"
+            )
 
         usage = getattr(resp, "usage", None)
         in_tok = getattr(usage, "prompt_tokens", None) if usage else None

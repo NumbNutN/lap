@@ -151,13 +151,12 @@ HARD RULES:
         NEVER write only "adjust the arm" — you must say WHICH
         direction and WHAT scene landmark it's relative to.
 
-    Heuristic for deciding TIER B vs C:
-      - Is the robot approaching a target to interact with it? → TIER B
-      - Is the next keyframe grasp/release/retry? → TIER B
-      - Is the robot adjusting orientation (pitch/yaw/roll) for a
-        specific target pose (e.g. becoming perpendicular)? → TIER B
-      - Is the robot just covering distance between scene regions
-        (lift, carry, retract, return)? → TIER C
+    How to decide TIER B vs C: look at the **TIER_B** tag in the input.
+      - If a keyframe's metadata line contains **TIER_B**, use TIER B.
+        These keyframes are within ±2 positions of a grasp/release/retry
+        and are likely in an interaction approach or fine-tune phase.
+      - If **TIER_B** is absent, use TIER C (qualitative + landmark).
+      The tag is provided by the detector — you do NOT need to guess.
 
   R7. No negative reasoning ("the robot did NOT…"). Describe what is.
 
@@ -170,9 +169,20 @@ HARD RULES:
       the Δ is incidental sampling — use it only to pick the dominant
       axis name, not to copy specific numbers into `action`.
 
-  R10 (stage style — CRITICAL for uniqueness & spatial grounding):
+  R10 (spatial orientation convention):
+    When describing direction, PREFER scene landmarks over bare
+    left/right/forward/backward:
+      ✓ "toward the sink", "away from the shelf", "over the counter edge"
+      ✗ "to the left", "moving forward" (ambiguous — left of what?)
+    When left/right is unavoidable, it refers to the **camera's point
+    of view** (what appears left/right in the image). This is consistent
+    within one episode but may differ across episodes filmed from
+    different angles. Scene landmarks are preferred because they
+    remain unambiguous regardless of camera placement.
 
-    R10a. SPATIAL UNIQUENESS: each `stage` MUST be specific enough that
+  R11 (stage style — CRITICAL for uniqueness & spatial grounding):
+
+    R11a. SPATIAL UNIQUENESS: each `stage` MUST be specific enough that
           a reader could identify WHICH keyframe it belongs to without
           seeing the frame index. Use spatial landmarks:
             - height relative to scene ("just above the counter", "at
@@ -188,7 +198,7 @@ HARD RULES:
           ✓ "The gripper has risen above the sink rim and is now level with the bottom shelf, carrying the candy bar."  (uniquely identifiable)
           ✓ "Just above the counter, the gripper pitches forward to orient its jaws perpendicular for a top-down grasp."
 
-    R10b. NUMBERS IN STAGE — gap-to-target OK, raw deltas NOT OK.
+    R11b. NUMBERS IN STAGE — gap-to-target OK, raw deltas NOT OK.
           Numbers that describe "how far from a target configuration"
           are GOOD because they anchor the state uniquely:
             ✓ "The gripper needs 39° more pitch to be perpendicular to the counter."
@@ -198,7 +208,7 @@ HARD RULES:
             ✗ "Carrying the Doritos 22cm sideways toward the sink basin."
             ✗ "The arm has moved 15cm upward from the table."
 
-    R10c. Plan-step references are OPTIONAL. Prefer scene-relational
+    R11c. Plan-step references are OPTIONAL. Prefer scene-relational
           descriptions over plan labels. Use plan-step only when it
           carries image-invisible info (retry count, which-attempt).
           ✗ "Plan step 4 transport phase: the robot moves toward the sink."
@@ -601,8 +611,11 @@ def build_user_text(
         if feed_types:
             bits.append(f"type={kf.get('type', '?'):<8}")
             bits.append(f"gripper={kf.get('gripper_state', '?')}")
-        if memory_augmented and kf.get("pose_delta_str"):
-            bits.append(kf["pose_delta_str"])
+        if memory_augmented:
+            if kf.get("near_interaction"):
+                bits.append("**TIER_B**")
+            if kf.get("pose_delta_str"):
+                bits.append(kf["pose_delta_str"])
         if feed_types and kf.get("previous_attempt_frame") is not None:
             bits.append(f"(previous failed grasp at frame {kf['previous_attempt_frame']})")
         lines.append(f"  [{i}]  " + "  ".join(bits))

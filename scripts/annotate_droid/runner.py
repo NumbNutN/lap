@@ -90,18 +90,32 @@ def annotate_episode(
             d = pose_delta(next_pose, cur_pose)
             pose_deltas_str[i] = str(d)
 
+    # 2b. Tag near-interaction keyframes (within ±2 of grasp/release/retry).
+    # The prompt tells the VLM: near_interaction=true → TIER B (fine-tune
+    # precision with numbers); false → TIER C (qualitative).
+    _INTERACTION_TYPES = {"grasp", "release", "retry"}
+    _NEAR_RADIUS = 2
+    near_interaction = [False] * len(keyframes)
+    if memory_augmented:
+        for i, kf in enumerate(keyframes):
+            if kf.type in _INTERACTION_TYPES:
+                for j in range(max(0, i - _NEAR_RADIUS),
+                               min(len(keyframes), i + _NEAR_RADIUS + 1)):
+                    near_interaction[j] = True
+
     # 3. Build VLM-ready metadata + lazy-load images for selected frames
     keyframes_meta = []
     for i, kf in enumerate(keyframes):
         d = {"frame_idx": kf.t}
         if feed_types or memory_augmented:
-            # v3 (memory_augmented) always needs types as anchor.
             d["type"] = kf.type
             d["gripper_state"] = kf.gripper_state or "unknown"
             if "previous_attempt_frame" in kf.extra:
                 d["previous_attempt_frame"] = kf.extra["previous_attempt_frame"]
-        if memory_augmented and pose_deltas_str[i]:
-            d["pose_delta_str"] = pose_deltas_str[i]
+        if memory_augmented:
+            if pose_deltas_str[i]:
+                d["pose_delta_str"] = pose_deltas_str[i]
+            d["near_interaction"] = near_interaction[i]
         keyframes_meta.append(d)
 
     try:
@@ -143,7 +157,18 @@ def annotate_episode(
             keyframes=keyframes,
         )
 
-    # 5. Construct annotation + run audit
+    # 5. Backfill type/gripper_state from detector onto VLM-parsed keyframes.
+    # v3 prompt R3 tells the VLM NOT to re-emit these (they come from our
+    # detector, not the model). But downstream consumers (viewer, audit,
+    # training) expect them per-keyframe. Copy from our detector output.
+    for i, kf_ann in enumerate(kf_anns):
+        if i < len(keyframes):
+            if kf_ann.type is None:
+                kf_ann.type = keyframes[i].type
+            if kf_ann.gripper_state is None:
+                kf_ann.gripper_state = keyframes[i].gripper_state
+
+    # 6. Construct annotation + run audit
     ann = EpisodeAnnotation(
         episode_id=bundle.episode_id,
         task_instruction=bundle.task_instruction,

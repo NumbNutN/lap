@@ -3,6 +3,7 @@
 > **owner**: 部署 VLM 服务的 agent（可修改）
 > **依据**: [`README_annotation_design.md`](README_annotation_design.md) §7 + §11
 > **基础设施 doc**: [`README_qwen_vlm_for_teleop_annotation.md`](README_qwen_vlm_for_teleop_annotation.md)
+> **当前实现状态**: v3（memory + pose-aware）已落地，见本文 §13。详细评测见 [`REPORT_v3_memory_pose_pilot.md`](REPORT_v3_memory_pose_pilot.md)。
 
 这个 doc 定义 **VLM 自动标注的 prompt 接口**：
 - 输入格式 (frames + context)
@@ -385,6 +386,80 @@ v3 (mature)
 修改不影响**已存在数据**：所有 cot_annotations JSON 都 forward-compatible（新字段可选；旧字段不删除）。
 
 如果要做 breaking change（删字段 / 改语义）：开 issue / 直接找 @numbnut 讨论先。
+
+---
+
+## 13. 当前实现状态 (DROID auto-annotator v3 — 2026-05-25)
+
+实现位于 [`annotate_droid/`](annotate_droid/) + [`annotate_droid_qwen.py`](annotate_droid_qwen.py)。启用 v3 用：
+
+```bash
+python annotate_droid_qwen.py --mode local --memory-augmented \
+    --rlds-dir <path> --rlds-name droid_100 --output <jsonl> --max-episodes N \
+    [--attn flash_attention_2]
+```
+
+### 13.1 与本文 §1-§7 的对齐情况
+
+| 本文章节 | 实现 | 备注 |
+|---|---|---|
+| §1 schema | ✅ 完全对齐 | `KeyframeAnnotation` 在 `schema.py` 加了 `mode_marker` 字段 |
+| §2 mode_marker | ✅ 标注阶段固定 `[think_act]` | 训练侧 mask 由下游消费者实现 |
+| §3 system prompt | ✅ 升级为 `SYSTEM_PROMPT_V3_MEMORY` | 增加了 R6 axis-name + pose delta 输入说明 |
+| §4 user message | ⚠️ 用 single-shot "memory chain in own response"，**不**显式构 `prior_keyframes_summary` 字符串 | 见 §13.2 |
+| §5 fewshot | ⚠️ v3 关闭 fewshot | v3 schema 与 v1 fewshot 不对齐，加 v3 fewshot 计划在 v3.1 |
+| §6 frame sampling | ⚠️ point-based (每 keyframe 1 帧)，而非 §6 的 segment 内多帧 | 见 §13.3 |
+| §7 audit | ✅ 全部实装于 `audit.py` + A6 (stage history check) 未来增 | A3/A8 在 v3 motion-start 锚定下已 calibrated |
+
+### 13.2 §4 偏差：single-shot memory vs prior_keyframes_summary
+
+DROID auto-annotator 每集做 1 次 VLM 调用，喂入所有 keyframes 的图 + meta + pose delta，让模型按顺序生成 keyframes 数组。模型**自己的早期生成**作为后续 keyframe 的 memory（auto-regressive in-response）。
+
+这等价于 §11.7 "full-episode AR" 训练策略 —— 标注阶段对应推理时的相同结构。
+
+如果未来切到 prefix-cutoff 采样或者每 keyframe 独立调用 API，再走 §4 的 `prior_keyframes_summary` 路径。
+
+### 13.3 §6 偏差：point-based vs segment-based 采样
+
+- **手动 GUI 标注**（`scripts/annotate_teleop_episodes.py`）：segment-based，用户手动标 `[frame_start, frame_end]` 区间，需要 §6 的多帧采样喂模型。
+- **DROID auto-annotator**：rule-based detector 输出 point keyframes（单帧锚点）。每 keyframe 喂 1 张外置相机图即可，VLM 通过 pose delta 推断"这段时间发生了什么"。
+
+schema 端的 `frame_idx` 字段对两种范式都通用。
+
+### 13.4 v3 新增的 pose delta 注入
+
+每个 keyframe 在 user message 里追加一段：
+```
+[5]  frame_idx=  74  type=grasp     gripper=closed  Δxyz=(+1.2cm,-0.4cm,-3.1cm)  Δrot=8° around -pitch
+```
+来源：[`annotate_droid/pose_utils.py`](annotate_droid/pose_utils.py) 的 `pose_delta()`，从 DROID `observation.cartesian_position` 6-DoF（xyz + Rodrigues rotvec）计算与上一 keyframe 的 relative motion。
+
+VLM 收到这个信号后，会输出 `"Pitch downward and lower 3 cm toward the sachet"` 而非 `"Approach the sachet"` —— **finer action signal**。
+
+5-ep pilot 实测：**43% keyframes 的 action 含 axis-aware 词汇**（yaw/pitch/roll/cm/deg/translate）。
+
+### 13.5 v3 已知问题（pilot 反馈）
+
+1. **R6 verb priority** — release/grasp keyframe 上 pose delta 大时，模型偏好 pose 动词，忽略 grip 动词。下一版 prompt 在 R6 加 "for grasp/release/retry keyframes, grip verb takes priority over pose delta".
+2. **think 0% 触发率** — 5 ep 全 clean trajectory 无 retry，think 字段未触发。需要更多含 retry 的样本验证 prompt §3 R5 是否够强。
+3. **A3 audit 偶尔过严** — 上面 R6 问题导致 release keyframe action 不含 release 动词被 audit 标 fail。修 R6 后预期降低。
+
+### 13.6 实现文件索引
+
+```
+annotate_droid/
+├── prompts.py        # SYSTEM_PROMPT_V3_MEMORY + build_user_text(memory_augmented=True)
+├── pose_utils.py     # Rodrigues 旋转向量 → axis-name 分类 + PoseDelta dataclass
+├── schema.py         # KeyframeAnnotation 加 mode_marker
+├── runner.py         # annotate_episode(memory_augmented=True) 计算 pose deltas 注入 keyframes_meta
+├── droid_reader.py   # EpisodeBundle.ee_pose (T, 6) 暴露
+├── client_qwen_local.py / client_qwen.py / client_mimo.py / client_gemini.py
+│                     # 全部 annotate(memory_augmented=...) 签名扩展
+├── audit.py          # A1-A8（A6 stage-history check 待加）
+└── ...
+```
+
+CLI: [`annotate_droid_qwen.py`](annotate_droid_qwen.py) 加 `--memory-augmented` flag。
 
 ---
 

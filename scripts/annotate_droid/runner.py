@@ -44,12 +44,19 @@ def annotate_episode(
     max_retries: int = 2,
     save_raw_on_fail: bool = True,
     feed_types: bool = True,
+    memory_augmented: bool = False,
 ) -> EpisodeAnnotation:
     """Annotate one episode end-to-end.
 
     When ``feed_types`` is False, the VLM is given ONLY the frame index
     of each keyframe (no type/gripper hint from our detector) and is
     expected to derive type+gripper_state from images itself.
+
+    When ``memory_augmented`` is True (v3 prompt mode), per-keyframe pose
+    deltas (cm + axis name) are computed from ``bundle.ee_pose`` and
+    formatted into the user message so the VLM can emit finer-grained
+    axis-aware actions. Implies feed_types=True. The model is also told
+    its earlier outputs serve as memory chain for later keyframes.
 
     Catches all VLM/parse exceptions and returns an EpisodeAnnotation
     with audit.passed=False rather than raising — so a batch run can
@@ -64,15 +71,32 @@ def annotate_episode(
     if not keyframes:
         return _failure(bundle, "no keyframes detected", "")
 
-    # 2. Build VLM-ready metadata + lazy-load images for selected frames
+    # 2. Compute per-keyframe pose deltas (vs prior keyframe) — only when
+    #    we have full 6-DoF pose data AND the user opted into memory mode.
+    pose_deltas_str: list[str] = ["" for _ in keyframes]
+    if memory_augmented and bundle.ee_pose is not None:
+        from .pose_utils import pose_delta
+        for i, kf in enumerate(keyframes):
+            cur_pose = bundle.ee_pose[kf.t]
+            if i == 0:
+                prev_pose = bundle.ee_pose[0]
+            else:
+                prev_pose = bundle.ee_pose[keyframes[i - 1].t]
+            d = pose_delta(cur_pose, prev_pose)
+            pose_deltas_str[i] = str(d)
+
+    # 3. Build VLM-ready metadata + lazy-load images for selected frames
     keyframes_meta = []
-    for kf in keyframes:
+    for i, kf in enumerate(keyframes):
         d = {"frame_idx": kf.t}
-        if feed_types:
+        if feed_types or memory_augmented:
+            # v3 (memory_augmented) always needs types as anchor.
             d["type"] = kf.type
             d["gripper_state"] = kf.gripper_state or "unknown"
             if "previous_attempt_frame" in kf.extra:
                 d["previous_attempt_frame"] = kf.extra["previous_attempt_frame"]
+        if memory_augmented and pose_deltas_str[i]:
+            d["pose_delta_str"] = pose_deltas_str[i]
         keyframes_meta.append(d)
 
     try:
@@ -80,7 +104,7 @@ def annotate_episode(
     except Exception as e:
         return _failure(bundle, f"frame_loader failed: {e}", "", keyframes=keyframes)
 
-    # 3. Call VLM with retries
+    # 4. Call VLM with retries
     raw_text = ""
     last_err = ""
     for attempt in range(max_retries + 1):
@@ -90,6 +114,7 @@ def annotate_episode(
                 keyframes_meta=keyframes_meta,
                 keyframe_images=keyframe_images,
                 feed_types=feed_types,
+                memory_augmented=memory_augmented,
             )
             raw_text = reply.text
             break
@@ -175,6 +200,7 @@ def run_batch(
     resume: bool = True,
     flush_every: int = 1,
     feed_types: bool = True,
+    memory_augmented: bool = False,
 ) -> dict[str, int]:
     """Run annotation over many bundles, append to output JSONL.
 
@@ -209,7 +235,11 @@ def run_batch(
                 counts["skipped"] += 1
                 continue
             t0 = time.monotonic()
-            ann = annotate_episode(bundle, client, feed_types=feed_types)
+            ann = annotate_episode(
+                bundle, client,
+                feed_types=feed_types,
+                memory_augmented=memory_augmented,
+            )
             dt = time.monotonic() - t0
             f.write(ann.to_jsonl_line() + "\n")
             if flush_every == 1:

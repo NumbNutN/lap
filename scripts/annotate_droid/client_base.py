@@ -38,11 +38,17 @@ class VlmClient(Protocol):
         keyframes_meta: list[dict],
         keyframe_images: list[np.ndarray],
         feed_types: bool = True,
+        memory_augmented: bool = False,
     ) -> VlmReply:
         """Annotate one episode. Caller is responsible for retries / parsing.
 
         When ``feed_types`` is False, the keyframes_meta omits type and
         gripper_state fields and the system prompt asks the VLM to derive
-        these from images. Default True preserves existing behaviour.
+        these from images.
+
+        When ``memory_augmented`` is True (v3 prompt), keyframes_meta
+        carries per-keyframe pose_delta_str and the system prompt asks
+        for memory-augmented stage + axis-aware actions + mode_marker.
+        Defaults preserve previous behaviour.
         """
         ...

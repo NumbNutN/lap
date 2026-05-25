@@ -156,6 +156,7 @@ class QwenVLLocalClient:
         keyframe_images: list[np.ndarray],
         include_fewshot: bool = True,
         feed_types: bool = True,
+        memory_augmented: bool = False,
     ) -> list[dict[str, Any]]:
         """Qwen-VL chat-message format: image refs use {"type": "image", "image": <PIL>}.
 
@@ -163,16 +164,17 @@ class QwenVLLocalClient:
         scans this structure to pull out images for the processor.
         """
         from PIL import Image
-        from .prompts import SYSTEM_PROMPT_NO_TYPES
+        from .prompts import _select_system_prompt
 
-        system_prompt = SYSTEM_PROMPT if feed_types else SYSTEM_PROMPT_NO_TYPES
+        system_prompt = _select_system_prompt(feed_types, memory_augmented)
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
         ]
-        if include_fewshot and feed_types:
-            # Fewshot is built around the types-fed schema; skip it in
-            # no-types mode to avoid biasing the VLM with prior examples.
+        if include_fewshot and feed_types and not memory_augmented:
+            # Fewshot is built around the v1 types-fed schema; skip it in
+            # no-types and v3 modes to avoid biasing the VLM with examples
+            # that don't match the requested output shape.
             messages.append({"role": "user", "content": [
                 {"type": "text", "text": build_fewshot_user_text()},
             ]})
@@ -185,6 +187,7 @@ class QwenVLLocalClient:
                 task_instruction=task_instruction,
                 keyframes_meta=keyframes_meta,
                 feed_types=feed_types,
+                memory_augmented=memory_augmented,
             )},
         ]
         for img in keyframe_images:
@@ -201,6 +204,7 @@ class QwenVLLocalClient:
         keyframes_meta: list[dict],
         keyframe_images: list[np.ndarray],
         feed_types: bool = True,
+        memory_augmented: bool = False,
     ) -> VlmReply:
         messages = self._build_messages_qwen(
             task_instruction=task_instruction,
@@ -208,6 +212,7 @@ class QwenVLLocalClient:
             keyframe_images=keyframe_images,
             include_fewshot=True,
             feed_types=feed_types,
+            memory_augmented=memory_augmented,
         )
 
         # Build the input tensors via Qwen's processor.

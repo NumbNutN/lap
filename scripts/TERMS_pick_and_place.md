@@ -221,3 +221,87 @@ action: Re-grasp the fallen blue cube.
 - 朝向：先轴名再方向 — `yaw counterclockwise` 不歧义
 - 避障：`clear the [obstacle]` / `arc around the [obstacle]`
 - retry 类 `think`：失败原因 + 修正方向两点
+
+## 11. Axis-aware action 词典（v3 memory-augmented 模式）
+
+> 与 [`README_prompt_engineering_spec.md`](README_prompt_engineering_spec.md) §13 v3 实现配套。
+> Auto-annotator 现在接收 per-keyframe pose delta：`Δxyz=(+1.2cm,-0.4cm,-3.1cm) Δrot=8° around -pitch`，VLM 应输出引用具体轴和量级的动作。
+
+### 11.1 输入 pose delta → 推荐 action 句式
+
+| pose delta 主导分量 | 推荐 action 句式 |
+|---|---|
+| `Δxyz` 中 +x 大（forward） | `Translate forward N cm to approach the [cube]` |
+| `Δxyz` 中 -x 大（backward） | `Retract N cm away from the [cube]` |
+| `Δxyz` 中 +y 大（leftward） | `Translate leftward N cm towards the [leftmost red cube]` |
+| `Δxyz` 中 -y 大（rightward） | `Translate rightward N cm towards the [rightmost red cube]` |
+| `Δxyz` 中 +z 大（up） | `Lift N cm above the workspace` |
+| `Δxyz` 中 -z 大（down） | `Lower N cm to the pre-grasp pose` |
+| `Δrot` axis=`yaw` 正 | `Yaw counterclockwise N degrees` |
+| `Δrot` axis=`-yaw` | `Yaw clockwise N degrees` |
+| `Δrot` axis=`pitch` 正 | `Pitch upward N degrees (tilt face up)` |
+| `Δrot` axis=`-pitch` | `Pitch downward N degrees (tilt face down)` |
+| `Δrot` axis=`roll` ± | `Roll {clockwise / counterclockwise} N degrees` |
+| `Δrot` axis=`compound` | `Reorient toward the [target object]` (不强求拆轴) |
+
+### 11.2 复合动作（多维度同时变）
+
+当 pose delta 同时有 translation + rotation：
+
+| 情境 | 推荐句式 |
+|---|---|
+| 下降 + yaw | `Lower N cm while yawing counterclockwise to align with the cube` |
+| 前进 + pitch | `Translate forward N cm while pitching downward toward the table` |
+| 抬升 + reorient | `Lift while reorienting toward the target row` |
+
+### 11.3 何时**忽略** pose delta（grip 动词优先）
+
+在以下 keyframe 类型，**抓握/释放语义比 pose delta 重要**，action 必须含 grip 动词：
+
+| keyframe `type` | action 必含 | 不要写 |
+|---|---|---|
+| `grasp` | `close` / `grasp` / `pick up` | "Pitch downward and move closer to the cube"（缺 grip 动词） |
+| `release` | `open` / `release` / `place` | "Yaw slightly while moving closer to the sink"（缺 release 动词） |
+| `retry` | `re-grasp` / `re-approach` / `retry` | 任何只描述 pose 调整的句子 |
+
+如果 grip 动作之外还有显著 pose 变化（比如 grasp 时还在 yaw），优先写 grip 动词，pose 用副句修饰：
+
+- ✅ `Close the gripper to grasp the marker while yawing counterclockwise`
+- ❌ `Yaw counterclockwise to align with the marker` （对 grasp keyframe 缺动词）
+
+### 11.4 量级修饰词（when N too small for cm/deg precision）
+
+| 数值范围 | 修饰词 |
+|---|---|
+| < 0.5 cm 或 < 3° | `slightly` / `a bit` / `marginal` |
+| 0.5-2 cm 或 3-10° | `a little` / `minor` |
+| 2-5 cm 或 10-25° | `moderately` / `clearly` |
+| > 5 cm 或 > 25° | `significantly` / 直接报数字 (`5 cm`, `30°`) |
+
+### 11.5 v3 实测 action 例子（从 pilot 抓的）
+
+来自 [`REPORT_v3_memory_pose_pilot.md`](REPORT_v3_memory_pose_pilot.md) 实际 VLM 输出：
+
+```
+Adjust position by tilting downward and moving right.
+Yaw counterclockwise and move closer to the sachet.
+Pitch upward and move closer to the sachet.
+Pitch downward and lift the sachet higher.
+Move towards the bowl while pitching upward.
+Move closer to the bowl while adjusting pitch.
+```
+
+这些 action **从 v2 升级到 v3** 后才出现 —— 没有 pose delta 输入时模型只会说 "Adjust the arm's position" / "Move closer"。
+
+### 11.6 Memory-augmented stage 例子（v3 实测）
+
+stage 现在 reference 之前发生的事件（image 看不出的历史）：
+
+```
+Following the initial search, the robot adjusts its position to better locate the sachet.
+After locating the sachet, the robot adjusts its orientation to prepare for grasping.
+With the sachet partially grasped, the robot prepares to lift it off the table.
+Post-release, the robot makes minor adjustments to confirm the sachet is properly placed in the bowl.
+```
+
+特征短语：`Following ...` / `After ...ing` / `With X having ...` / `Post-release` / `Now that ...`

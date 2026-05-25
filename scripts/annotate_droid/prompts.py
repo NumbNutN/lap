@@ -33,6 +33,90 @@ from PIL import Image
 # System prompt — the main iteration surface
 # ---------------------------------------------------------------------------
 
+SYSTEM_PROMPT_V3_MEMORY = """You annotate embodied chain-of-thought reasoning for a \
+single-arm Franka Panda robot manipulation episode from the DROID dataset.
+
+You receive:
+  1. Natural-language task instruction.
+  2. A list of KEYFRAMES — each with: frame index, type label from a
+     rule-based detector (begin/grasp/release/retry/motion/filler/end),
+     observed gripper state (open/partial/closed), an external camera
+     image, an optional wrist camera image, and a POSE DELTA from the
+     previous keyframe formatted as Δxyz (cm) + Δrot (deg around
+     yaw/pitch/roll/compound).
+
+You emit per-keyframe annotations as a SEQUENCE (in order), so each
+annotation may reference earlier annotations in this same response as
+"memory" — that is the whole point of the architecture.
+
+OUTPUT — strictly valid JSON, no markdown fence, no commentary:
+
+{
+  "plan": "<2-5 sentences. State the overall goal + inline numbered \
+sub-goals. If the trajectory does NOT actually complete the task (early \
+truncation, abandoned, etc.), describe what actually happens.>",
+  "keyframes": [
+    {
+      "frame_idx": <int — copy from input>,
+      "mode_marker": "[think_act]",
+      "stage": "<15-40 words. Describe the current state AND any \
+image-invisible context: plan-step progress, past failures, counters, \
+cross-keyframe causality. Examples of GOOD stage content:\\n\
+  - 'Having released the marker into the pot, the gripper retracts \
+upward. Plan step 4 (release) just completed; this is the start of \
+the recovery / return phase.'\\n\
+  - 'This is the second pair in plan step 2; the first attempt missed.'\\n\
+NEVER just describe what is visible ('the gripper is open above the \
+table'). NEVER restate the plan verbatim.>",
+      "think": "<null OR 1-2 sentences. FILL when one of:\\n\
+  - type=retry (REQUIRED — explain failure cause + corrective approach)\\n\
+  - multi-step planning decision ('picking leftmost first to free space')\\n\
+  - obstacle / orientation choice ('lifting higher to clear the bowl')\\n\
+  - reasoning about invisible info ('target is the pot because we are \
+holding the marker')\\n\
+Target 30-40% of keyframes have non-null think. Routine \
+approach/transport keyframes should be null.>",
+      "action": "<Imperative phrase, 5-12 words, axis-aware vocabulary. \
+Use axis names from the input Δrot when applicable:\\n\
+  - 'Yaw counterclockwise slightly to align the gripper with the marker'\\n\
+  - 'Tilt downward 8 degrees while lowering 3 cm above the cube'\\n\
+  - 'Translate forward 5 cm to approach the candy bar'\\n\
+  - 'Close the gripper to grasp the marker firmly'\\n\
+Atomic primitives are OK when the move is trivially small: 'Open the \
+gripper'. AVOID generic 'move forward / move down' when the input \
+Δxyz/Δrot indicates a more specific motion direction.>"
+    },
+    ...
+  ]
+}
+
+HARD RULES:
+
+  R1. keyframes length = input keyframe count, in same order, same frame_idx.
+
+  R2. mode_marker MUST be "[think_act]" on every keyframe (downstream
+      training will sample sub-modes).
+
+  R3. type & gripper_state are provided in the input — do NOT re-emit them.
+      You CAN use them as anchors; the detector is reliable for these.
+
+  R4. stage MUST contain at least one piece of image-invisible context
+      (plan progress / past event / counter / cross-step causality). If you
+      can't add such context, you are doing it wrong — try harder.
+
+  R5. think non-null on every type=retry keyframe (audit will reject).
+
+  R6. action verb / direction should match the Δxyz/Δrot signal when one
+      stands out. Example: if Δrot is "12° yaw", action should mention
+      yaw rotation; if Δxyz dominates (e.g. -8cm z = lowering), action
+      should mention "lower" / "z descent".
+
+  R7. No negative reasoning ("the robot did NOT…"). Describe what is.
+
+  R8. Plan ≤ 5 sentences. Stage ≤ 40 words. Action ≤ 12 words.
+"""
+
+
 SYSTEM_PROMPT_NO_TYPES = """You annotate embodied chain-of-thought reasoning for a \
 single-arm Franka Panda robot manipulation episode from the DROID dataset.
 
@@ -289,12 +373,15 @@ def build_user_text(
     task_instruction: str,
     keyframes_meta: list[dict],
     feed_types: bool = True,
+    memory_augmented: bool = False,
 ) -> str:
     """User-message text portion (separate from images).
 
-    When ``feed_types`` is False, the per-keyframe ``type`` and
-    ``gripper_state`` fields are omitted from the listing (mode B
-    pilot — let the VLM derive these from images).
+    Per-keyframe meta dict may include:
+      - frame_idx (always)
+      - type, gripper_state (when feed_types=True)
+      - pose_delta_str (when memory_augmented=True; pre-formatted by runner)
+      - previous_attempt_frame (when applicable)
     """
     lines = [
         f"TASK: {task_instruction}",
@@ -302,18 +389,25 @@ def build_user_text(
         f"KEYFRAMES ({len(keyframes_meta)} total, in order):",
     ]
     for i, kf in enumerate(keyframes_meta):
+        bits = [f"frame_idx={kf['frame_idx']:>4d}"]
         if feed_types:
-            extra = ""
-            if kf.get("previous_attempt_frame") is not None:
-                extra = f" (previous failed grasp at frame {kf['previous_attempt_frame']})"
-            lines.append(
-                f"  [{i}]  frame_idx={kf['frame_idx']:>4d}  type={kf['type']:<8}"
-                f"  gripper={kf['gripper_state']}{extra}"
-            )
-        else:
-            lines.append(f"  [{i}]  frame_idx={kf['frame_idx']:>4d}")
+            bits.append(f"type={kf.get('type', '?'):<8}")
+            bits.append(f"gripper={kf.get('gripper_state', '?')}")
+        if memory_augmented and kf.get("pose_delta_str"):
+            bits.append(kf["pose_delta_str"])
+        if feed_types and kf.get("previous_attempt_frame") is not None:
+            bits.append(f"(previous failed grasp at frame {kf['previous_attempt_frame']})")
+        lines.append(f"  [{i}]  " + "  ".join(bits))
     lines.append("")
-    lines.append("Annotate every keyframe. Emit valid JSON only.")
+    if memory_augmented:
+        lines.append(
+            "Annotate every keyframe in order. Each keyframe's `stage` should "
+            "reference relevant prior keyframes (plan-step progress, prior "
+            "failures, counters) — your earlier outputs in this same response "
+            "are your memory chain. Emit valid JSON only."
+        )
+    else:
+        lines.append("Annotate every keyframe. Emit valid JSON only.")
     return "\n".join(lines)
 
 
@@ -333,6 +427,14 @@ def build_fewshot_assistant_text() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _select_system_prompt(feed_types: bool, memory_augmented: bool) -> str:
+    if memory_augmented:
+        # v3 supersedes both v1 (feed_types) and no-types modes when
+        # memory + pose-aware fields are wanted.
+        return SYSTEM_PROMPT_V3_MEMORY
+    return SYSTEM_PROMPT if feed_types else SYSTEM_PROMPT_NO_TYPES
+
+
 def build_openai_messages(
     *,
     task_instruction: str,
@@ -340,22 +442,21 @@ def build_openai_messages(
     keyframe_images: list[np.ndarray],
     include_fewshot: bool = True,
     feed_types: bool = True,
+    memory_augmented: bool = False,
 ) -> list[dict[str, Any]]:
     """Build OpenAI / vLLM chat-completion messages (used by Qwen client).
 
     ``keyframe_images[i]`` corresponds to ``keyframes_meta[i]``.
-    When ``feed_types`` is False, the system prompt + per-keyframe meta
-    omit the type / gripper_state fields and the VLM must derive them
-    from images.
+    When ``memory_augmented`` is True we use the v3 prompt that asks for
+    memory-augmented stage + axis-aware actions + ``mode_marker`` field.
     """
-    system_prompt = SYSTEM_PROMPT if feed_types else SYSTEM_PROMPT_NO_TYPES
+    system_prompt = _select_system_prompt(feed_types, memory_augmented)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
     ]
-    if include_fewshot and feed_types:
-        # Skip fewshot in no-types mode — the fewshot is built around
-        # type-fed inputs and could leak biases (e.g. "release at f110"
-        # priors). VLM with no-types should not see prior examples.
+    # Skip fewshot for v3 memory-augmented + no-types modes (their schema
+    # differs from the v1 fewshot and would bias outputs).
+    if include_fewshot and feed_types and not memory_augmented:
         messages.append({"role": "user", "content": build_fewshot_user_text()})
         messages.append({"role": "assistant", "content": build_fewshot_assistant_text()})
 
@@ -365,6 +466,7 @@ def build_openai_messages(
             task_instruction=task_instruction,
             keyframes_meta=keyframes_meta,
             feed_types=feed_types,
+            memory_augmented=memory_augmented,
         )},
     ]
     for img in keyframe_images:
@@ -384,15 +486,11 @@ def build_gemini_contents(
     keyframe_images: list[np.ndarray],
     include_fewshot: bool = True,
     feed_types: bool = True,
+    memory_augmented: bool = False,
 ) -> tuple[str, list[Any]]:
-    """Build Gemini ``contents`` argument. Returns (system_instruction, contents).
-
-    Gemini takes system separately from the contents list. Contents is a
-    flat list of alternating user / model turns, where each turn can mix
-    text and PIL Image parts.
-    """
+    """Build Gemini ``contents`` argument. Returns (system_instruction, contents)."""
     contents: list[Any] = []
-    if include_fewshot and feed_types:
+    if include_fewshot and feed_types and not memory_augmented:
         contents.append({"role": "user", "parts": [{"text": build_fewshot_user_text()}]})
         contents.append({"role": "model", "parts": [{"text": build_fewshot_assistant_text()}]})
 
@@ -401,6 +499,7 @@ def build_gemini_contents(
             task_instruction=task_instruction,
             keyframes_meta=keyframes_meta,
             feed_types=feed_types,
+            memory_augmented=memory_augmented,
         )},
     ]
     for img in keyframe_images:
@@ -408,5 +507,5 @@ def build_gemini_contents(
             img = img.astype(np.uint8)
         user_parts.append(Image.fromarray(img))
     contents.append({"role": "user", "parts": user_parts})
-    system_text = SYSTEM_PROMPT if feed_types else SYSTEM_PROMPT_NO_TYPES
+    system_text = _select_system_prompt(feed_types, memory_augmented)
     return system_text, contents

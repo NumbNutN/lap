@@ -92,6 +92,10 @@ def main() -> int:
                     help=("Don't feed our detector's keyframe type/gripper_state "
                           "to the VLM; let it derive these from images "
                           "(experimental mode B for type-fed bias study)."))
+    ap.add_argument("--memory-augmented", action="store_true",
+                    help=("Use v3 prompt: memory-augmented stage + axis-aware "
+                          "actions (uses pose deltas) + mode_marker field. "
+                          "Implies --feed-types (incompatible with --no-feed-types)."))
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -140,11 +144,15 @@ def main() -> int:
             max_completion_tokens=args.max_new_tokens,
         )
 
+    if args.memory_augmented and args.no_feed_types:
+        ap.error("--memory-augmented requires types fed; cannot combine with --no-feed-types")
+
     counts = run_batch(
         bundles, client,
         output_jsonl=args.output,
         resume=not args.no_resume,
         feed_types=not args.no_feed_types,
+        memory_augmented=args.memory_augmented,
     )
     print(f"\nDone. emitted={counts['emitted']} skipped={counts['skipped']} failed={counts['failed']}")
     return 0 if counts["failed"] == 0 else 1

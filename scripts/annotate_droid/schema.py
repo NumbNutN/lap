@@ -62,6 +62,13 @@ class KeyframeAnnotation:
     # `keyframe_types` array instead. Keep None when source is detector.
     type: str | None = None
     gripper_state: str | None = None
+    # multi-objective training marker per
+    # README_prompt_engineering_spec.md §2. At annotation time the VLM
+    # always emits "[think_act]" (the richest mode); downstream training
+    # sampler mask-decodes to "[stage]" / "[act]" / "[think_act]" samples.
+    # When the prompt is the older "no-marker" variant this stays None
+    # and downstream code defaults it.
+    mode_marker: str | None = None
 
 
 @dataclass
@@ -211,6 +218,9 @@ def parse_vlm_output(text: str) -> tuple[str, list[KeyframeAnnotation]]:
                 type=(str(raw["type"]).strip() if raw.get("type") else None),
                 gripper_state=(
                     str(raw["gripper_state"]).strip() if raw.get("gripper_state") else None
+                ),
+                mode_marker=(
+                    str(raw["mode_marker"]).strip() if raw.get("mode_marker") else None
                 ),
             )
         except (KeyError, ValueError, TypeError) as e:

@@ -58,6 +58,11 @@ class EpisodeBundle:
     ee_pos: np.ndarray | None
     frame_loader: Callable[[int], np.ndarray]
     wrist_loader: Callable[[int], np.ndarray] | None = None
+    # Full 6-DoF end-effector pose, shape (T, 6) = [x, y, z, rx, ry, rz].
+    # rx/ry/rz is a Rodrigues rotation vector (DROID convention). Used by
+    # the prompt builder to compute per-keyframe pose deltas (cm + axis
+    # name) so the VLM can emit finer-grained axis-aware actions.
+    ee_pose: np.ndarray | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +159,13 @@ def iter_droid_rlds(
         obs = traj["observation"]
         gripper_width = np.asarray(obs["gripper_position"]).astype(np.float32)
         # Franka EE pose: shape (T, 6) translation + axis-angle. Take first 3.
-        ee_pose = np.asarray(obs.get("cartesian_position", obs.get("joint_position"))).astype(np.float32)
-        ee_pos = ee_pose[:, :3] if ee_pose.ndim == 2 else None
+        ee_pose_arr = np.asarray(obs.get("cartesian_position", obs.get("joint_position"))).astype(np.float32)
+        ee_pos = ee_pose_arr[:, :3] if ee_pose_arr.ndim == 2 else None
+        # Keep full 6-DoF (xyz + Rodrigues rotvec) when present — used by
+        # the prompt builder to compute axis-aware deltas. cartesian_position
+        # is (T, 6); joint_position is (T, 7) and not directly usable as
+        # an EE pose, so only attach when shape matches.
+        full_ee_pose = ee_pose_arr if (ee_pose_arr.ndim == 2 and ee_pose_arr.shape[1] == 6) else None
         T = int(gripper_width.shape[0])
 
         # ---- lazy image loaders ----------------------------------------
@@ -188,6 +198,7 @@ def iter_droid_rlds(
             ee_pos=ee_pos,
             frame_loader=frame_loader,
             wrist_loader=wrist_loader,
+            ee_pose=full_ee_pose,
         )
 
         n_emitted += 1

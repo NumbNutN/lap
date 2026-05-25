@@ -22,7 +22,7 @@ from .runner import run_batch
 class MockVlmClient:
     model = "mock-vlm-v0"
 
-    def annotate(self, *, task_instruction, keyframes_meta, keyframe_images):
+    def annotate(self, *, task_instruction, keyframes_meta, keyframe_images, **_):
         # Build a "perfect" reply that matches the keyframe schema.
         out = {
             "plan": (

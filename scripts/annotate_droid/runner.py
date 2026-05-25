@@ -43,8 +43,13 @@ def annotate_episode(
     *,
     max_retries: int = 2,
     save_raw_on_fail: bool = True,
+    feed_types: bool = True,
 ) -> EpisodeAnnotation:
     """Annotate one episode end-to-end.
+
+    When ``feed_types`` is False, the VLM is given ONLY the frame index
+    of each keyframe (no type/gripper hint from our detector) and is
+    expected to derive type+gripper_state from images itself.
 
     Catches all VLM/parse exceptions and returns an EpisodeAnnotation
     with audit.passed=False rather than raising — so a batch run can
@@ -62,13 +67,12 @@ def annotate_episode(
     # 2. Build VLM-ready metadata + lazy-load images for selected frames
     keyframes_meta = []
     for kf in keyframes:
-        d = {
-            "frame_idx": kf.t,
-            "type": kf.type,
-            "gripper_state": kf.gripper_state or "unknown",
-        }
-        if "previous_attempt_frame" in kf.extra:
-            d["previous_attempt_frame"] = kf.extra["previous_attempt_frame"]
+        d = {"frame_idx": kf.t}
+        if feed_types:
+            d["type"] = kf.type
+            d["gripper_state"] = kf.gripper_state or "unknown"
+            if "previous_attempt_frame" in kf.extra:
+                d["previous_attempt_frame"] = kf.extra["previous_attempt_frame"]
         keyframes_meta.append(d)
 
     try:
@@ -85,6 +89,7 @@ def annotate_episode(
                 task_instruction=bundle.task_instruction,
                 keyframes_meta=keyframes_meta,
                 keyframe_images=keyframe_images,
+                feed_types=feed_types,
             )
             raw_text = reply.text
             break
@@ -169,6 +174,7 @@ def run_batch(
     output_jsonl: str | Path,
     resume: bool = True,
     flush_every: int = 1,
+    feed_types: bool = True,
 ) -> dict[str, int]:
     """Run annotation over many bundles, append to output JSONL.
 
@@ -203,7 +209,7 @@ def run_batch(
                 counts["skipped"] += 1
                 continue
             t0 = time.monotonic()
-            ann = annotate_episode(bundle, client)
+            ann = annotate_episode(bundle, client, feed_types=feed_types)
             dt = time.monotonic() - t0
             f.write(ann.to_jsonl_line() + "\n")
             if flush_every == 1:

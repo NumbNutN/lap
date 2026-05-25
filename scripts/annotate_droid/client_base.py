@@ -37,6 +37,12 @@ class VlmClient(Protocol):
         task_instruction: str,
         keyframes_meta: list[dict],
         keyframe_images: list[np.ndarray],
+        feed_types: bool = True,
     ) -> VlmReply:
-        """Annotate one episode. Caller is responsible for retries / parsing."""
+        """Annotate one episode. Caller is responsible for retries / parsing.
+
+        When ``feed_types`` is False, the keyframes_meta omits type and
+        gripper_state fields and the system prompt asks the VLM to derive
+        these from images. Default True preserves existing behaviour.
+        """
         ...

@@ -88,6 +88,10 @@ def main() -> int:
 
     ap.add_argument("--no-resume", action="store_true",
                     help="ignore existing output file (default: skip already-done episodes)")
+    ap.add_argument("--no-feed-types", action="store_true",
+                    help=("Don't feed our detector's keyframe type/gripper_state "
+                          "to the VLM; let it derive these from images "
+                          "(experimental mode B for type-fed bias study)."))
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -140,6 +144,7 @@ def main() -> int:
         bundles, client,
         output_jsonl=args.output,
         resume=not args.no_resume,
+        feed_types=not args.no_feed_types,
     )
     print(f"\nDone. emitted={counts['emitted']} skipped={counts['skipped']} failed={counts['failed']}")
     return 0 if counts["failed"] == 0 else 1

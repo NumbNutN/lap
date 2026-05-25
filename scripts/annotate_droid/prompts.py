@@ -33,6 +33,83 @@ from PIL import Image
 # System prompt — the main iteration surface
 # ---------------------------------------------------------------------------
 
+SYSTEM_PROMPT_NO_TYPES = """You annotate embodied chain-of-thought reasoning for a \
+single-arm Franka Panda robot manipulation episode from the DROID dataset.
+
+You receive:
+  1. Natural-language task instruction.
+  2. A short list of KEYFRAMES, each as just a frame index + an external
+     camera image. Wrist image is optional.
+
+You must derive EVERYTHING from the images alone — including what kind
+of event the keyframe is (grasp / release / approach / etc.) and what
+the gripper is doing.
+
+OUTPUT — strictly valid JSON, no markdown fence, no commentary outside:
+
+{
+  "plan": "<2-5 sentences. Overall goal + inline numbered sub-goals \
+(e.g. \\"1) approach the cup, 2) grasp it, 3) place it on the saucer\\"). \
+Use concrete object names from the images. If the trajectory you see \
+does NOT match the task instruction (e.g. trajectory truncated, or robot \
+performs only part of the task), describe what actually happens.>",
+  "keyframes": [
+    {
+      "frame_idx": <int — copy from input>,
+      "type": "<one of: begin | grasp | release | retry | motion | end. \
+You may also use an open-vocabulary verb if the standard types fit \
+poorly (e.g. 'approach', 'transport', 'fine-tune', 'idle', 'push').>",
+      "gripper_state": "<open | partial | closed — visually determined>",
+      "stage": "<1-3 sentences. Why is this stage happening NOW? What is \
+the immediate sub-goal? Use concrete object names visible in the frame. \
+Do NOT restate the plan.>",
+      "think": "<OPTIONAL or null. Only include for retry-type keyframes \
+or genuinely non-obvious decisions.>",
+      "action": "<Imperative phrase, OPEN VOCABULARY, ≤ 18 words. Style \
+ranges from atomic primitives to richly grounded compound actions:\\n\
+  - atomic:    'Close the right gripper'\\n\
+  - grounded:  'Approach the red cube on the left'\\n\
+  - geometric: 'Rotate the yaw angle to align the gripper on top of the block'\\n\
+  - compound:  'Close the gripper and push the block on the right side'\\n\
+Pick the level that best describes what is happening — prefer concrete \
+object names and spatial qualifiers over generic 'move forward / down'.>"
+    },
+    ...
+  ]
+}
+
+HARD RULES the grader will check:
+
+  R1. The "keyframes" array length MUST equal the number of input
+      keyframes, in the same order, with the same frame_idx values.
+
+  R2. Determine `type` from VISUAL evidence:
+      - "grasp"   — gripper is in the act of closing on an object
+      - "release" — gripper is in the act of opening to release
+      - "retry"   — gripper closing again after a recent failed grasp
+      - "motion"  — arm in motion but gripper state is steady
+      - "begin"/"end" — first / last frame of the episode
+      - Or an open-vocab verb when the above don't fit.
+
+  R3. The `gripper_state` must match what you SEE:
+      - "open" if fingers are clearly apart (nothing between them)
+      - "closed" if fingers are touching (or grasping an object firmly)
+      - "partial" if mid-transition or holding a thin object
+
+  R4. The [action] for grasp/release keyframes must reference the
+      object being grasped/released, by name.
+
+  R5. No negative reasoning. Describe what IS happening.
+
+  R6. If the trajectory does not actually complete the task (gripper
+      never reaches target, or task abandoned), say so in the plan
+      and in any affected keyframe's [stage]. DO NOT pretend the task
+      was completed.
+
+  R7. Plan ≤ 5 sentences. Stage ≤ 3 sentences. Action ≤ 18 words.
+"""
+
+
 SYSTEM_PROMPT = """You annotate embodied chain-of-thought reasoning for a \
 single-arm Franka Panda robot manipulation episode from the DROID dataset.
 
@@ -207,11 +284,17 @@ def encode_image_b64(arr: np.ndarray, *, max_side: int = 384, quality: int = 80)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def build_user_text(*, task_instruction: str, keyframes_meta: list[dict]) -> str:
+def build_user_text(
+    *,
+    task_instruction: str,
+    keyframes_meta: list[dict],
+    feed_types: bool = True,
+) -> str:
     """User-message text portion (separate from images).
 
-    Each provider attaches images differently; this function returns the
-    metadata table the VLM sees alongside the images.
+    When ``feed_types`` is False, the per-keyframe ``type`` and
+    ``gripper_state`` fields are omitted from the listing (mode B
+    pilot — let the VLM derive these from images).
     """
     lines = [
         f"TASK: {task_instruction}",
@@ -219,13 +302,16 @@ def build_user_text(*, task_instruction: str, keyframes_meta: list[dict]) -> str
         f"KEYFRAMES ({len(keyframes_meta)} total, in order):",
     ]
     for i, kf in enumerate(keyframes_meta):
-        extra = ""
-        if kf.get("previous_attempt_frame") is not None:
-            extra = f" (previous failed grasp at frame {kf['previous_attempt_frame']})"
-        lines.append(
-            f"  [{i}]  frame_idx={kf['frame_idx']:>4d}  type={kf['type']:<8}"
-            f"  gripper={kf['gripper_state']}{extra}"
-        )
+        if feed_types:
+            extra = ""
+            if kf.get("previous_attempt_frame") is not None:
+                extra = f" (previous failed grasp at frame {kf['previous_attempt_frame']})"
+            lines.append(
+                f"  [{i}]  frame_idx={kf['frame_idx']:>4d}  type={kf['type']:<8}"
+                f"  gripper={kf['gripper_state']}{extra}"
+            )
+        else:
+            lines.append(f"  [{i}]  frame_idx={kf['frame_idx']:>4d}")
     lines.append("")
     lines.append("Annotate every keyframe. Emit valid JSON only.")
     return "\n".join(lines)
@@ -253,22 +339,32 @@ def build_openai_messages(
     keyframes_meta: list[dict],
     keyframe_images: list[np.ndarray],
     include_fewshot: bool = True,
+    feed_types: bool = True,
 ) -> list[dict[str, Any]]:
     """Build OpenAI / vLLM chat-completion messages (used by Qwen client).
 
     ``keyframe_images[i]`` corresponds to ``keyframes_meta[i]``.
+    When ``feed_types`` is False, the system prompt + per-keyframe meta
+    omit the type / gripper_state fields and the VLM must derive them
+    from images.
     """
+    system_prompt = SYSTEM_PROMPT if feed_types else SYSTEM_PROMPT_NO_TYPES
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
     ]
-    if include_fewshot:
+    if include_fewshot and feed_types:
+        # Skip fewshot in no-types mode — the fewshot is built around
+        # type-fed inputs and could leak biases (e.g. "release at f110"
+        # priors). VLM with no-types should not see prior examples.
         messages.append({"role": "user", "content": build_fewshot_user_text()})
         messages.append({"role": "assistant", "content": build_fewshot_assistant_text()})
 
     # Real query — text first, then one image per keyframe in order.
     content: list[dict[str, Any]] = [
         {"type": "text", "text": build_user_text(
-            task_instruction=task_instruction, keyframes_meta=keyframes_meta
+            task_instruction=task_instruction,
+            keyframes_meta=keyframes_meta,
+            feed_types=feed_types,
         )},
     ]
     for img in keyframe_images:
@@ -287,6 +383,7 @@ def build_gemini_contents(
     keyframes_meta: list[dict],
     keyframe_images: list[np.ndarray],
     include_fewshot: bool = True,
+    feed_types: bool = True,
 ) -> tuple[str, list[Any]]:
     """Build Gemini ``contents`` argument. Returns (system_instruction, contents).
 
@@ -295,13 +392,15 @@ def build_gemini_contents(
     text and PIL Image parts.
     """
     contents: list[Any] = []
-    if include_fewshot:
+    if include_fewshot and feed_types:
         contents.append({"role": "user", "parts": [{"text": build_fewshot_user_text()}]})
         contents.append({"role": "model", "parts": [{"text": build_fewshot_assistant_text()}]})
 
     user_parts: list[Any] = [
         {"text": build_user_text(
-            task_instruction=task_instruction, keyframes_meta=keyframes_meta
+            task_instruction=task_instruction,
+            keyframes_meta=keyframes_meta,
+            feed_types=feed_types,
         )},
     ]
     for img in keyframe_images:
@@ -309,4 +408,5 @@ def build_gemini_contents(
             img = img.astype(np.uint8)
         user_parts.append(Image.fromarray(img))
     contents.append({"role": "user", "parts": user_parts})
-    return SYSTEM_PROMPT, contents
+    system_text = SYSTEM_PROMPT if feed_types else SYSTEM_PROMPT_NO_TYPES
+    return system_text, contents

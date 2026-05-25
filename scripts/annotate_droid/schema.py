@@ -57,6 +57,11 @@ class KeyframeAnnotation:
     stage: str
     action: str
     think: str | None = None
+    # Optionally emitted by the VLM (no-types prompt mode). When the
+    # types-fed prompt is used these come back via the episode-level
+    # `keyframe_types` array instead. Keep None when source is detector.
+    type: str | None = None
+    gripper_state: str | None = None
 
 
 @dataclass
@@ -201,6 +206,11 @@ def parse_vlm_output(text: str) -> tuple[str, list[KeyframeAnnotation]]:
                     None
                     if raw.get("think") in (None, "", "null")
                     else str(raw["think"]).strip()
+                ),
+                # Optional in types-fed mode (None) — populated in no-types mode.
+                type=(str(raw["type"]).strip() if raw.get("type") else None),
+                gripper_state=(
+                    str(raw["gripper_state"]).strip() if raw.get("gripper_state") else None
                 ),
             )
         except (KeyError, ValueError, TypeError) as e:

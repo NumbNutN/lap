@@ -149,21 +149,31 @@ def audit_episode(
                 )
 
     # A8: gripper-state consistency (uses STRICT vocab — see top of file).
-    # Pilot data showed broad RELEASE_VERBS / GRASP_VERBS overfire on
-    # mid-motion frames where the model writes "Place X" or "Pick Y" as
-    # stage-intent phrasing. A8 should only flag direct physical
-    # contradictions ("open the gripper" while it is closed).
-    if expected_gripper_states is not None and len(expected_gripper_states) == len(ann.keyframes):
-        for i, (kf, gs) in enumerate(zip(ann.keyframes, expected_gripper_states, strict=True)):
+    # NOTE: with motion-START keyframe anchoring (introduced 2026-05-24),
+    # grasp keyframes legitimately have gripper_state="open" (fingers
+    # about to close) and release keyframes have gripper_state="closed"
+    # (fingers about to open). So A8 must SKIP grasp/release types —
+    # they're already constrained by A3 above. A8 only catches
+    # contradictions at motion/begin/end/filler keyframes where the
+    # gripper state is steady.
+    if (expected_gripper_states is not None
+            and expected_keyframe_types is not None
+            and len(expected_gripper_states) == len(ann.keyframes)
+            and len(expected_keyframe_types) == len(ann.keyframes)):
+        for i, (kf, gs, kf_type) in enumerate(zip(
+                ann.keyframes, expected_gripper_states, expected_keyframe_types,
+                strict=True)):
+            if kf_type in {"grasp", "release", "retry"}:
+                continue
             if gs == "closed" and _contains_any(kf.action, STRICT_RELEASE_PHRASES):
                 report.errors.append(
-                    f"A8 keyframes[{i}] gripper closed but action says it is opening: "
-                    f"{kf.action!r}"
+                    f"A8 keyframes[{i}] (type={kf_type}) gripper closed but "
+                    f"action says it is opening: {kf.action!r}"
                 )
             if gs == "open" and _contains_any(kf.action, STRICT_GRASP_PHRASES):
                 report.errors.append(
-                    f"A8 keyframes[{i}] gripper open but action says it is closing: "
-                    f"{kf.action!r}"
+                    f"A8 keyframes[{i}] (type={kf_type}) gripper open but "
+                    f"action says it is closing: {kf.action!r}"
                 )
 
     report.passed = not report.errors

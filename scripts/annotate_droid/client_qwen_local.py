@@ -155,6 +155,7 @@ class QwenVLLocalClient:
         keyframes_meta: list[dict],
         keyframe_images: list[np.ndarray],
         include_fewshot: bool = True,
+        feed_types: bool = True,
     ) -> list[dict[str, Any]]:
         """Qwen-VL chat-message format: image refs use {"type": "image", "image": <PIL>}.
 
@@ -162,11 +163,16 @@ class QwenVLLocalClient:
         scans this structure to pull out images for the processor.
         """
         from PIL import Image
+        from .prompts import SYSTEM_PROMPT_NO_TYPES
+
+        system_prompt = SYSTEM_PROMPT if feed_types else SYSTEM_PROMPT_NO_TYPES
 
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
         ]
-        if include_fewshot:
+        if include_fewshot and feed_types:
+            # Fewshot is built around the types-fed schema; skip it in
+            # no-types mode to avoid biasing the VLM with prior examples.
             messages.append({"role": "user", "content": [
                 {"type": "text", "text": build_fewshot_user_text()},
             ]})
@@ -176,7 +182,9 @@ class QwenVLLocalClient:
 
         user_content: list[dict[str, Any]] = [
             {"type": "text", "text": build_user_text(
-                task_instruction=task_instruction, keyframes_meta=keyframes_meta
+                task_instruction=task_instruction,
+                keyframes_meta=keyframes_meta,
+                feed_types=feed_types,
             )},
         ]
         for img in keyframe_images:
@@ -192,12 +200,14 @@ class QwenVLLocalClient:
         task_instruction: str,
         keyframes_meta: list[dict],
         keyframe_images: list[np.ndarray],
+        feed_types: bool = True,
     ) -> VlmReply:
         messages = self._build_messages_qwen(
             task_instruction=task_instruction,
             keyframes_meta=keyframes_meta,
             keyframe_images=keyframe_images,
             include_fewshot=True,
+            feed_types=feed_types,
         )
 
         # Build the input tensors via Qwen's processor.

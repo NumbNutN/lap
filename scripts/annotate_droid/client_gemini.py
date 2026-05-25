@@ -69,12 +69,14 @@ class GeminiClient:
         task_instruction: str,
         keyframes_meta: list[dict],
         keyframe_images: list[np.ndarray],
+        feed_types: bool = True,
     ) -> VlmReply:
         system_text, contents = build_gemini_contents(
             task_instruction=task_instruction,
             keyframes_meta=keyframes_meta,
             keyframe_images=keyframe_images,
             include_fewshot=True,
+            feed_types=feed_types,
         )
 
         # GenerateContentConfig: ask for JSON output (response_mime_type).

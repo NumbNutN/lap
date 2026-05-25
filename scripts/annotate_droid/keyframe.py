@@ -51,9 +51,21 @@ import numpy as np
 # Thresholds (Franka Panda DROID, ~15Hz). Tune in __main__ debug mode.
 # ---------------------------------------------------------------------------
 
-# Gripper width discretisation (metres). Franka max is ~0.08.
-GRIP_CLOSED_MAX = 0.005
-GRIP_OPEN_MIN = 0.060
+# DROID gripper convention (confirmed by direct inspection of
+# /data/datasets/droid_data_template/droid_100, see analysis 2026-05-24):
+#
+#   observation.gripper_position is the COMMANDED normalised position
+#   in [0, 1] where 0 = fully open command, 1 = fully closed command.
+#   Actual physical width depends on what is between the fingers (a thin
+#   object stops closure early, so values rarely reach 1.0 — a marker
+#   episode tops out at ~0.81).
+#
+# Earlier we had this inverted (assuming Franka physical width where
+# 0 ≈ closed and 0.08 ≈ open) which gave ALL ep0 keyframe types wrong
+# direction. See cot_annotation discussion 2026-05-24.
+GRIP_OPEN_MAX = 0.15      # gripper_position < this  → "open"
+GRIP_CLOSED_MIN = 0.50    # gripper_position > this  → "closed"
+                          # in between → "partial" (transitioning / holding object)
 
 # Hysteresis: how many consecutive frames must a new state hold before we
 # accept it as a transition. Suppresses bounce/contact-pulse noise.
@@ -110,9 +122,9 @@ class Keyframe:
 
 
 def gripper_state(width: float) -> GripperState:
-    if width < GRIP_CLOSED_MAX:
+    if width > GRIP_CLOSED_MIN:
         return "closed"
-    if width > GRIP_OPEN_MIN:
+    if width < GRIP_OPEN_MAX:
         return "open"
     return "partial"
 
@@ -155,6 +167,30 @@ def gripper_transitions(
 # ---------------------------------------------------------------------------
 # R3: Failed-grasp retry detection
 # ---------------------------------------------------------------------------
+
+
+def refine_to_motion_start(
+    gripper_width: np.ndarray,
+    transition_t: int,
+    persist_frames: int = GRIP_PERSIST_FRAMES,
+    eps: float = 0.05,
+) -> int:
+    """Walk backward from a state-transition timestamp to find the first
+    frame where the gripper VALUE began departing from its prior baseline.
+
+    State-based detection (R2) anchors at the END of a transition (when
+    the new state stabilizes). For human-meaningful labels we want the
+    START of the motion (when fingers first begin to close / open).
+    """
+    if transition_t <= 0:
+        return 0
+    lookback = max(persist_frames * 4, 12)
+    start = max(0, transition_t - lookback)
+    baseline = float(gripper_width[start])
+    for t in range(start + 1, transition_t + 1):
+        if abs(float(gripper_width[t]) - baseline) > eps:
+            return max(start, t - 1)
+    return transition_t
 
 
 def detect_grasp_retries(
@@ -301,15 +337,22 @@ def detect_keyframes(
     # R5 — boundary
     raw_keyframes: dict[int, KeyframeType] = {0: "begin", T - 1: "end"}
 
+    # Anchor grasp/release keyframes at the START of the gripper motion,
+    # not the END of the transition (state-based detection's natural
+    # output). Matches human intuition that "f60 = grasp" means the
+    # moment fingers first begin to close.
+    refined_grasp_releases: dict[int, str] = {}
     for t, _, to_state in transitions:
+        refined_t = refine_to_motion_start(gripper_width, t)
         if t in retry_starts:
-            raw_keyframes[t] = "retry"
+            refined_grasp_releases[refined_t] = "retry"
         elif to_state == "closed":
-            raw_keyframes[t] = "grasp"
+            refined_grasp_releases[refined_t] = "grasp"
         elif to_state == "open":
-            raw_keyframes[t] = "release"
+            refined_grasp_releases[refined_t] = "release"
         else:
-            raw_keyframes.setdefault(t, "motion")
+            refined_grasp_releases.setdefault(refined_t, "motion")
+    raw_keyframes.update(refined_grasp_releases)
 
     for t, _cs in motion_changes:
         raw_keyframes.setdefault(t, "motion")

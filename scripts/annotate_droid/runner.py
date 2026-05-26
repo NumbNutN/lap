@@ -96,12 +96,32 @@ def annotate_episode(
     _INTERACTION_TYPES = {"grasp", "release", "retry"}
     _NEAR_RADIUS = 2
     near_interaction = [False] * len(keyframes)
+    # Finer sub-tag: "pre_release" / "pre_grasp" / "post_release" / "post_grasp"
+    # so the prompt can give release-approach-specific examples.
+    interaction_context: list[str | None] = [None] * len(keyframes)
     if memory_augmented:
         for i, kf in enumerate(keyframes):
             if kf.type in _INTERACTION_TYPES:
                 for j in range(max(0, i - _NEAR_RADIUS),
                                min(len(keyframes), i + _NEAR_RADIUS + 1)):
                     near_interaction[j] = True
+        # Sub-tag: for each TIER_B keyframe, classify WHY it's near interaction.
+        for i, kf in enumerate(keyframes):
+            if not near_interaction[i] or kf.type in _INTERACTION_TYPES:
+                continue  # only tag the motion frames around interactions
+            # Look for the nearest interaction keyframe.
+            nearest_inter = None
+            nearest_dist = float("inf")
+            for j, kf2 in enumerate(keyframes):
+                if kf2.type in _INTERACTION_TYPES and abs(i - j) < nearest_dist:
+                    nearest_dist = abs(i - j)
+                    nearest_inter = (j, kf2.type)
+            if nearest_inter is not None:
+                j, itype = nearest_inter
+                if i < j:
+                    interaction_context[i] = f"pre_{itype}"
+                else:
+                    interaction_context[i] = f"post_{itype}"
 
     # 3. Build VLM-ready metadata + lazy-load images for selected frames
     keyframes_meta = []
@@ -116,6 +136,8 @@ def annotate_episode(
             if pose_deltas_str[i]:
                 d["pose_delta_str"] = pose_deltas_str[i]
             d["near_interaction"] = near_interaction[i]
+            if interaction_context[i]:
+                d["interaction_context"] = interaction_context[i]
         keyframes_meta.append(d)
 
     try:

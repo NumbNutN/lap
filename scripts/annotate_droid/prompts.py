@@ -129,11 +129,26 @@ HARD RULES:
       Use AXIS-AWARE vocabulary with numbers. These numbers are
       meaningful because they describe "how much more motion is needed
       to reach the target configuration" — a useful policy signal.
-      "Gap-to-target" phrasing is especially valuable:
+
+      **Pre-grasp** (tag shows `TIER_B:pre_grasp`) — gap-to-target phrasing:
           ✓ "Pitch downward 39° to orient jaws perpendicular to the counter"
           ✓ "Lower 2 cm and yaw 5° to align with the cube"
           ✓ "Tilt 8° more to face the marker squarely"
           ✓ "Translate forward 1 cm to seat the gripper on the candy bar"
+
+      **Pre-release** (tag shows `TIER_B:pre_release`) — describe the
+      final positioning needed before the gripper opens. This is equally
+      important as pre-grasp precision because releasing at the wrong
+      height or angle causes the object to bounce or miss the target:
+          ✓ "Lower 5 cm to align with the shelf surface before releasing"
+          ✓ "Descend 3 cm to place the marker just above the pot opening"
+          ✓ "Translate forward 2 cm to center above the bowl rim"
+          ✓ "Hold steady 1 cm above the target spot on the table"
+
+      **Post-grasp / post-release** (tag shows `post_grasp` / `post_release`)
+      — initial lift or retraction, axis name + small number OK:
+          ✓ "Lift 2 cm to clear the table surface with the grasped cube"
+          ✓ "Retract upward 3 cm to clear the pot rim after release"
 
     TIER C — TRANSPORT / RETRACT motion keyframes
       (the gripper is moving FREELY between scene regions — lifting
@@ -405,14 +420,22 @@ FEWSHOT_V3_USER = {
         {"frame_idx": 0,   "type": "begin",   "gripper_state": "open",
          "pose_delta_str": "Δxyz=(+3.2cm,-1.1cm,-1.5cm)  Δrot=4° around -yaw"},
         {"frame_idx": 22,  "type": "motion",  "gripper_state": "open",
+         "near_interaction": True, "interaction_context": "pre_grasp",
          "pose_delta_str": "Δxyz=(+1.0cm,-0.4cm,-6.8cm)  Δrot=2° around pitch"},
         {"frame_idx": 41,  "type": "motion",  "gripper_state": "open",
+         "near_interaction": True, "interaction_context": "pre_grasp",
          "pose_delta_str": "Δxyz=(+0.3cm,-0.2cm,-0.4cm)  Δrot=11° around -yaw"},
         {"frame_idx": 55,  "type": "grasp",   "gripper_state": "closed",
+         "near_interaction": True,
          "pose_delta_str": "Δxyz=(+0.2cm,+0.1cm,+0.0cm)  Δrot=3° around pitch"},
         {"frame_idx": 80,  "type": "motion",  "gripper_state": "closed",
+         "near_interaction": True, "interaction_context": "post_grasp",
          "pose_delta_str": "Δxyz=(-2.4cm,+4.8cm,+5.6cm)  Δrot=6° around yaw"},
+        {"frame_idx": 95,  "type": "motion",  "gripper_state": "closed",
+         "near_interaction": True, "interaction_context": "pre_release",
+         "pose_delta_str": "Δxyz=(+0.1cm,+0.0cm,-3.0cm)  Δrot=1° around pitch"},
         {"frame_idx": 105, "type": "release", "gripper_state": "open",
+         "near_interaction": True,
          "pose_delta_str": "Δxyz=(+0.5cm,-0.1cm,-0.2cm)  Δrot=1° around pitch"},
         {"frame_idx": 124, "type": "end",     "gripper_state": "open",
          "pose_delta_str": "Δxyz=(+0.0cm,+0.0cm,+0.0cm)  Δrot=0° around yaw"},
@@ -479,10 +502,18 @@ FEWSHOT_V3_ASSISTANT = {
             "action": "Arc leftward over the table toward the towel.",
         },
         {
+            "frame_idx": 95,
+            "mode_marker": "[think_act]",
+            # TIER_B:pre_release — precise final positioning before release
+            "stage": "Directly above the towel center, the gripper holds the cube 3 cm above the cloth surface, almost at placement height.",
+            "think": None,
+            # TIER B — pre-release: axis + number + intent
+            "action": "Lower 3 cm to reach the towel surface before releasing.",
+        },
+        {
             "frame_idx": 105,
             "mode_marker": "[think_act]",
-            # stage: precise spatial anchor (directly above towel)
-            "stage": "The gripper is now directly above the center of the towel, holding the cube at a low height ready for placement.",
+            "stage": "The cube is now touching the towel. The gripper opens to complete the placement.",
             "think": None,
             # TIER A — release: grip verb
             "action": "Open the gripper to release the cube onto the towel.",
@@ -613,7 +644,11 @@ def build_user_text(
             bits.append(f"gripper={kf.get('gripper_state', '?')}")
         if memory_augmented:
             if kf.get("near_interaction"):
-                bits.append("**TIER_B**")
+                ctx = kf.get("interaction_context", "")
+                if ctx:
+                    bits.append(f"**TIER_B:{ctx}**")
+                else:
+                    bits.append("**TIER_B**")
             if kf.get("pose_delta_str"):
                 bits.append(kf["pose_delta_str"])
         if feed_types and kf.get("previous_attempt_frame") is not None:

@@ -53,7 +53,13 @@ RELEASE_VERBS = {"open", "release", "let go", "drop", "place", "set down", "put 
 # contradict the observed gripper state. 5-ep pilot showed the old A8
 # triggering on every "Place"/"Pick" at mid-motion frames, all false.)
 STRICT_GRASP_PHRASES = {"close the gripper", "close gripper", "clamp", "squeeze"}
-STRICT_RELEASE_PHRASES = {"open the gripper", "open gripper", "release"}
+# "release" alone is too broad — "approach release height" / "after
+# release" use it as noun/adjective and shouldn't trigger A8. Require
+# verb-object patterns: "release the X" / "release it" / "release onto".
+STRICT_RELEASE_PHRASES = {
+    "open the gripper", "open gripper",
+    "release the", "release it", "release onto",
+}
 
 # Hard length caps (R8 in the system prompt). These map to ~2-3 sentences.
 MAX_PLAN_CHARS = 600

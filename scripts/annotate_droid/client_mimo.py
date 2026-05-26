@@ -38,13 +38,15 @@ from .prompts import build_openai_messages
 class MiMoClient:
     """Wrapper around MiMo's OpenAI-compatible endpoint."""
 
-    DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1"
+    DEFAULT_BASE_URL = "https://token-plan-sgp.xiaomimimo.com/v1"
 
     def __init__(
         self,
         *,
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
+        # mimo-v2.5-pro doesn't support image input (404 "No endpoints
+        # found that support image input"). Use base mimo-v2.5.
         model: str = "mimo-v2.5",
         request_timeout_s: float = 300.0,
         # 4096 (was 2048): long DROID episodes (15+ keyframes) can exceed

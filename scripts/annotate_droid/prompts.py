@@ -130,25 +130,25 @@ HARD RULES:
       meaningful because they describe "how much more motion is needed
       to reach the target configuration" — a useful policy signal.
 
-      **Pre-grasp** (tag shows `TIER_B:pre_grasp`) — gap-to-target phrasing:
-          ✓ "Pitch downward 39° to orient jaws perpendicular to the counter"
-          ✓ "Lower 2 cm and yaw 5° to align with the cube"
-          ✓ "Tilt 8° more to face the marker squarely"
-          ✓ "Translate forward 1 cm to seat the gripper on the candy bar"
+      The input Δ for TIER_B pre_grasp / pre_release keyframes is a
+      **gap-to-interaction-pose**: the distance/rotation from HERE to the
+      actual grasp/release moment. This is the real control target, not
+      a sampling step. Use it directly.
 
-      **Pre-release** (tag shows `TIER_B:pre_release`) — describe the
-      final positioning needed before the gripper opens. This is equally
-      important as pre-grasp precision because releasing at the wrong
-      height or angle causes the object to bounce or miss the target:
-          ✓ "Lower 5 cm to align with the shelf surface before releasing"
-          ✓ "Descend 3 cm to place the marker just above the pot opening"
-          ✓ "Translate forward 2 cm to center above the bowl rim"
-          ✓ "Hold steady 1 cm above the target spot on the table"
+      **Pre-grasp** (tag `TIER_B:pre_grasp`):
+          ✓ "Right 1.7 cm, pitch forward 2° to align jaws with bottle neck"
+          ✓ "Lower 3 cm to reach the block; approach from the left to clear adjacent piece"
+          ✗ "Position fingers around object and begin grasp closure" (ZERO information)
+          ✗ "Survey scene and begin approach" (filler phrase)
 
-      **Post-grasp / post-release** (tag shows `post_grasp` / `post_release`)
-      — initial lift or retraction, axis name + small number OK:
-          ✓ "Lift 2 cm to clear the table surface with the grasped cube"
-          ✓ "Retract upward 3 cm to clear the pot rim after release"
+      **Pre-release** (tag `TIER_B:pre_release`):
+          ✓ "Lower 5 cm to seat the marker just above the pot opening"
+          ✓ "Forward 2 cm to center above the bowl rim before releasing"
+          ✗ "Prepare to release the object" (filler)
+
+      **Post-grasp / post-release** (`post_grasp` / `post_release`):
+          ✓ "Lift 2 cm to clear the table with the grasped cube"
+          ✓ "Retract 3 cm above the pot rim"
 
     TIER C — TRANSPORT / RETRACT motion keyframes
       (the gripper is moving FREELY between scene regions — lifting
@@ -176,6 +176,37 @@ HARD RULES:
   R7. No negative reasoning ("the robot did NOT…"). Describe what is.
 
   R8. Plan ≤ 5 sentences. Stage ≤ 40 words. Action ≤ 12 words.
+
+  R12 (INFORMATION DENSITY — every word must carry positional or semantic info):
+
+    R12a. ZERO FILLER. These phrases are BANNED because they carry no
+          positional information:
+            ✗ "Survey scene and begin approach"
+            ✗ "Position fingers around object"
+            ✗ "Prepare to re-engage object"
+            ✗ "Begin grasp closure"
+          Replace with WHAT specifically: direction, distance, object part.
+
+    R12b. AFFORDANCE at grasp/pre-grasp: describe WHICH PART of the
+          object the gripper targets and WHY:
+            ✓ "Align jaws with the narrow neck of the bottle"
+            ✓ "Grip the mug handle from the right side"
+            ✓ "Approach the front half of the yellow block — rear half
+               is blocked by the adjacent blue piece"
+            ✗ "Position fingers around target block" (which part? why?)
+            ✗ "Gripper surrounding yellow mug body" (where on the body?)
+
+    R12c. SPATIAL CONSTRAINTS from nearby objects. If something limits
+          the approach angle or gripper orientation, name it:
+            ✓ "Approach from the left to clear the adjacent LEGO brick"
+            ✓ "Grip the bottle at the 2/3 height mark, avoiding the cap"
+            ✗ "Arm hovering near the microwave zone" (is the microwave
+               actually constraining the motion? if not, don't mention it)
+
+    R12d. STAGE must add value beyond what's visible. Don't describe the
+          obvious ("the gripper is open"). Instead: where on the object
+          is the gripper targeting? What constraint shapes the approach?
+          What was the outcome of the previous stage that led here?
 
   R9. Δxyz / Δrot semantics: the values describe the motion that happens
       BETWEEN this keyframe and the NEXT keyframe (forward-looking, in
@@ -477,20 +508,20 @@ FEWSHOT_V3_ASSISTANT = {
         {
             "frame_idx": 41,
             "mode_marker": "[think_act]",
-            # stage: GAP-TO-TARGET number (39° from perpendicular) = OK
-            "stage": "Just above the blue cube, the gripper needs about 11° more yaw to align its jaws with the cube's edge orientation before closing.",
-            "think": None,
-            # TIER B — pre-grasp fine-tune: precise axis + gap-to-target
-            "action": "Yaw counterclockwise 11° to align jaws with the cube edge.",
+            # stage: affordance — WHY this yaw (cube edge alignment)
+            "stage": "Jaws 11° off from the cube's long edge; cube sits near the table corner so approach from above-left avoids the table rim.",
+            "think": "Cube is flush with the table edge on the right side — approaching from above-left gives the cleanest jaw clearance.",
+            # TIER B — pre-grasp: gap-to-grasp-pose + affordance
+            "action": "Yaw 11° CCW to align jaws with the cube's long edge.",
         },
         {
             "frame_idx": 55,
             "mode_marker": "[think_act]",
-            # stage: references prior alignment event
-            "stage": "Having aligned its jaws with the cube, the gripper hovers 1 cm above the cube surface, ready to close for a top-down grasp.",
+            # stage: WHERE on the cube (affordance)
+            "stage": "Jaws centered on the cube's mid-height; top-down grasp on the flat top face, 1 cm to close.",
             "think": None,
-            # TIER A — grasp: grip verb only
-            "action": "Close the gripper to grasp the blue cube.",
+            # TIER A — grasp: grip verb + object part
+            "action": "Close the gripper on the cube's flat top face.",
         },
         {
             "frame_idx": 80,

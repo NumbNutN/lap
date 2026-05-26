@@ -81,12 +81,35 @@ def annotate_episode(
     pose_deltas_str: list[str] = ["" for _ in keyframes]
     if memory_augmented and bundle.ee_pose is not None:
         from .pose_utils import pose_delta
+
+        # For TIER_B pre_grasp / pre_release keyframes, compute gap to the
+        # ACTUAL interaction pose (the grasp/release keyframe's EE pose),
+        # not just the next keyframe. This is the real control target —
+        # "how much further until the gripper reaches its grasp configuration"
+        # — vs the old forward-delta which was just a sampling step.
+        # For all other keyframes, keep forward-delta to next keyframe.
         for i, kf in enumerate(keyframes):
             cur_pose = bundle.ee_pose[kf.t]
+            ctx = interaction_context[i]
+
+            if ctx and ctx.startswith("pre_"):
+                # Find the target interaction keyframe ahead
+                target_type = ctx.split("_", 1)[1]  # "grasp" or "release"
+                target_pose = None
+                for j in range(i + 1, len(keyframes)):
+                    if keyframes[j].type == target_type:
+                        target_pose = bundle.ee_pose[keyframes[j].t]
+                        break
+                if target_pose is not None:
+                    d = pose_delta(target_pose, cur_pose)
+                    pose_deltas_str[i] = f"gap-to-{target_type}: {d}"
+                    continue
+
+            # Default: forward delta to next keyframe
             if i + 1 < len(keyframes):
                 next_pose = bundle.ee_pose[keyframes[i + 1].t]
             else:
-                next_pose = cur_pose  # last keyframe — Δ = 0
+                next_pose = cur_pose
             d = pose_delta(next_pose, cur_pose)
             pose_deltas_str[i] = str(d)
 

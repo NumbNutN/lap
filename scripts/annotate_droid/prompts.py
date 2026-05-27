@@ -146,23 +146,25 @@ ACTION STYLE GUIDE:
         The grip verb (close / open / release / re-grasp / pick) takes PRIORITY over other.
         ✓ "Close the gripper to grasp the marker while pitching down 4°"
 
-    TRANSPORT / RETRACT motion keyframes
-      
-      the gripper is moving FREELY between scene regions — lifting
-      from a table to a shelf, carrying an object across the workspace,
-      retracting after release. The per-keyframe Δ here is just one
-      sample of continuous motion, not a commanded waypoint.:
-        Describe direction + scene-landmark relation (qualitative):
-          ✓ "Lift the candy bar up to the shelf level"
-          ✓ "Head towards 9 o'clock in camera view and descend to get closer to the candy."
-          ✗ "Approach the candy on the table" (which direction? how to approach?)
-        You MAY name an axis without a number ("lift while yawing
-        toward the pot"). When use bare numbers like "translate 12 cm",
-        make sure it's helpful in reaching the target state.
-        NEVER write only "adjust the arm" — you must say WHICH
-        direction and WHAT scene landmark it's relative to.
+    transport / retract motion keyframes
 
-    INTERACTION / FINE-TUNING motion keyframes
+    There's two style reference
+
+    1. The movement has a clear relative goal
+    It's welcome to use the Δpose to describe action, use axis-aware vocabulary with numbers.
+    ✓ "leftward 5.6cm, forward 3.6cm and lower 2.1cm, yawing counterclockwise 13° to align the handle of the mug with the gripper jaws"
+
+    2. The gripper is moving FREELY between scene regions - precise pose is not critical, the keyframe is just a sample of continuous motion, you just describe the trend direction, like "move forward and upward with yaw clockwise to approach the bottle cluster"
+    ✓ "Lift the candy bar up to the shelf level"
+    ✓ "Head towards 9 o'clock in camera view"
+    
+    Avoid descrption without direction, reference, or numbers:
+    You MAY name an axis without a number ("lift while yawing
+    toward the pot"). 
+    ✗ "Approach the candy on the table" (which direction? how to approach?) It just like repeating the plan without any information about the current state or how to move.
+
+
+    interaction / fine-tuning motion keyframes
 
       The gripper is APPROACHING a target object for interaction, OR
       making precise corrections to align with it. This includes:
@@ -176,7 +178,7 @@ ACTION STYLE GUIDE:
       **gap-to-interaction-pose**: the distance/rotation from HERE to the
       actual grasp/release moment.
 
-      Use AXIS-AWARE vocabulary with numbers. These numbers are meaningful because they describe "how much motion the human demonstration does".
+      Use AXIS-AWARE vocabulary with numbers. These numbers are meaningful because they describe "how much motion to go".
 
       **Pre-grasp** (tag `pre_grasp`):
           ✓ "Right 1.7 cm, pitch forward 2° to align jaws with bottle neck"
@@ -195,11 +197,12 @@ ACTION STYLE GUIDE:
 
 THINK STYLE GUIDANCE:
 
-        think happen when 
-        - type=retry (REQUIRED — explain failure cause + corrective approach)
-        - multi-step planning decision ('picking leftmost first to free space')
-        - obstacle / orientation choice ('lifting higher to clear the bowl')
-        - reasoning about invisible info ('target is the pot because we are holding the marker')
+        [think] only happen in the case you think there's something is non-obvious to perform the next action.
+        - Retry: You just failed a attempt and try again, inaccurate alignment before grasp or place the object; place at wrong place; the object slipped during lifting so you should adjust the grip and try again; etc.
+        - multi-step planning decision: You should first do something not directly related to the target object to make the subsequent interaction easier, like "picking leftmost first to free space for the right one", "moving the bowl out of the way before placing the block on the table", etc.
+        - obstacle / orientation choice: You notice these's risk to collide with something if you approach from one direction, or you need to orient the gripper in a certain way to clear the obstacle.
+
+        DO NOT fill [think] for regular case, it's obvious to do "lower 5 cm to reach the block" when you are 5 cm above the block, no need to say "the gripper is 5 cm above the block so lower 5 cm to reach it". But if there's an obstacle near the block and you need to approach from a certain direction, then you should fill [think] with "approach from the left to clear the adjacent bowl".
 
 
 ADDITIONAL GUIDANCE:

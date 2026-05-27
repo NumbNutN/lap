@@ -203,10 +203,34 @@ HARD RULES:
             ✗ "Arm hovering near the microwave zone" (is the microwave
                actually constraining the motion? if not, don't mention it)
 
-    R12d. STAGE must add value beyond what's visible. Don't describe the
-          obvious ("the gripper is open"). Instead: where on the object
-          is the gripper targeting? What constraint shapes the approach?
-          What was the outcome of the previous stage that led here?
+    R12d. STAGE writing formula — three elements, in this order:
+          1. SUBJECT + CURRENT POSITION (relative to scene, not raw numbers)
+          2. TARGET STATE (what configuration the gripper is trying to reach)
+          3. HOW / remaining gap (only for contact-rich fine-tune)
+
+          FAR from target (transport/approach):
+            ✓ "Gripper in the upper-right of the frame, descending
+               toward the bottle cluster on the counter."
+            ✓ "Arm carrying the marker leftward over the table, pot
+               visible ahead at the left edge."
+            ✗ "+2.1 cm right, +1.6 cm back, +7.7 cm up with 13°
+               compound" (raw delta dump — NEVER do this)
+
+          NEAR target (contact-rich fine-tune):
+            ✓ "Slight CCW yaw then lower will center the cup rim
+               between the jaws."
+            ✓ "Jaws straddling the bottle neck; 1 cm lower to reach
+               the mid-body grasp height."
+            ✗ "Near-interaction. +1.7 cm right, +0.2 cm up with 2°
+               pitch" (copying input metadata format into stage)
+
+          NEVER use the word "compound" in stage — it's an internal
+          axis classification. If rotation is multi-axis, describe
+          what it ACHIEVES: "reorienting to face downward" not "13°
+          compound rotation".
+
+          NEVER start a stage sentence with raw numbers. Start with
+          the gripper's relation to scene objects.
 
   R9. Δxyz / Δrot semantics: the values describe the motion that happens
       BETWEEN this keyframe and the NEXT keyframe (forward-looking, in

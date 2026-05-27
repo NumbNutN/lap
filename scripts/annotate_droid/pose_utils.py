@@ -118,12 +118,19 @@ _AXIS_NAMES_POS = ["roll", "pitch", "yaw"]    # world x / y / z
 
 
 def classify_axis(axis_unit) -> str:
-    """Return 'yaw' / '-yaw' / 'pitch' / '-pitch' / 'roll' / '-roll' / 'compound'."""
+    """Return 'yaw' / '-yaw' / 'pitch' / '-pitch' / 'roll' / '-roll' / 'mixed-axis'.
+
+    Changed 'compound' → 'mixed-axis' because 'compound' leaked into
+    VLM stage output as a meaningless technical term. 'mixed-axis'
+    is slightly more self-explanatory but the prompt tells the VLM
+    to describe the EFFECT (e.g. 'reorienting to face downward')
+    rather than parroting this label.
+    """
     axis_unit = np.asarray(axis_unit, dtype=np.float64)
     abs_axis = np.abs(axis_unit)
     dominant = int(np.argmax(abs_axis))
     if abs_axis[dominant] < _AXIS_THRESHOLD:
-        return "compound"
+        return "mixed-axis"
     name = _AXIS_NAMES_POS[dominant]
     return name if axis_unit[dominant] >= 0 else f"-{name}"
 

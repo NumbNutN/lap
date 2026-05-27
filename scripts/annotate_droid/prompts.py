@@ -60,12 +60,11 @@ truncation, abandoned, etc.), describe what actually happens.>",
       "frame_idx": <int — copy from input>,
       "mode_marker": "[think_act]",
       "stage": "<15-40 words. Describe the current state AND any \
-image-invisible context: plan-step progress, past failures, counters, \
+image-invisible context: past failures, counters, \
 cross-keyframe causality. Examples of GOOD stage content:\\n\
   - 'Having released the marker into the pot, the gripper retracts \
-upward. Plan step 4 (release) just completed; this is the start of \
-the recovery / return phase.'\\n\
-  - 'This is the second pair in plan step 2; the first attempt missed.'\\n\
+upward.'\\n\
+  - 'The gripper failed to grasp the marker on the first attempt.'\\n\
 NEVER just describe what is visible ('the gripper is open above the \
 table'). NEVER restate the plan verbatim.>",
       "think": "<null OR 1-2 sentences. FILL when one of:\\n\
@@ -83,65 +82,96 @@ Use axis names from the input Δrot when applicable:\\n\
   - 'Translate forward 5 cm to approach the candy bar'\\n\
   - 'Close the gripper to grasp the marker firmly'\\n\
 Atomic primitives are OK when the move is trivially small: 'Open the \
-gripper'. AVOID generic 'move forward / move down' when the input \
-Δxyz/Δrot indicates a more specific motion direction.>"
+gripper'.>"
     },
     ...
   ]
 }
 
-HARD RULES:
+STAGE STYLE GUIDE:
 
-  R1. keyframes length = input keyframe count, in same order, same frame_idx.
+    Think about what 2-3 things most important contribute the frame's state.
+    Some perspectives:
+    1. SUBJECT + CURRENT POSITION (relative to scene, landmarks, camera view, etc. ) find the key relative position best describe the state.
+    2. TARGET STATE - what configuration the gripper is trying to reach if the gripper in contact-rich fine-tuning phase, could use precise gap-to-target pose deltas here.
+    3. Environmental CONSTRAINTS - Carefully find out if the gripper is navigating around an obstacle, or if a nearby object limits the approach angle, name it.
 
-  R2. mode_marker MUST be "[think_act]" on every keyframe (downstream
-      training will sample sub-modes).
+    Some spcific perspectives example:
+    - spatial landmarks: height relative to scene ("just above the counter", "at shelf level", "risen past the sink rim")
+    - gripper orientation state ("jaws perpendicular to counter",
+              "opening facing down toward the marker")
+    - object interaction state ("candy bar secured in gripper",
+              "marker resting in the pot")
+    - state changes ("The bottle next to it was hit by the gripper.")
 
-  R3. type & gripper_state are provided in the input — do NOT re-emit them.
-      You CAN use them as anchors; the detector is reliable for these.
+    A good stage is specific enough that a reader could identify WHICH keyframe it belongs to without seeing the frame index. 
 
-  R4. stage MUST contain at least one piece of image-invisible context
-      (plan progress / past event / counter / cross-step causality). If you
-      can't add such context, you are doing it wrong — try harder.
+    Reference:
+    FAR from target (approach/transport phase):
+        ✓ "Gripper in the upper-right of the frame, descending toward the bottle cluster on the counter." (action expert may know what to do next based on this state description)
+        ✓ "Gripper moved across the sink, about 5cm to the left front of the brush"
+        ✗ "+2.1 cm right, +1.6 cm back, +7.7 cm up with 13°
+               compound" (raw delta dump — You are just not describing the state here)
 
-  R5. think non-null on every type=retry keyframe (audit will reject).
+    NEAR target (contact-rich fine-tune):
+        ✓ "The gripper needs 39° more pitch to be perpendicular to the counter."
+        ✓ "The gripper hovers 2 cm above the candy bar, ready to close." (gap-to-target is good here, informatively describes the state, and also help the action expert know what to do )
+        ✗ "The gripper is almost aligned with the cube" (ambiguous - how close? Too rough for fine-tuning phase, not informative for action expert to know what to do next)
 
-  R6 (action vocabulary — three tiers; the key is WHEN to use numbers):
+            R12a. ZERO FILLER. These phrases are BANNED because they carry no
+        positional information:
+        ✗ "Survey scene and begin approach"
+        ✗ "Position fingers around object"
+        ✗ "Prepare to re-engage object"
+        ✗ "Begin grasp closure"
+        Replace with WHAT specifically: direction, distance, object part.
 
-    TIER A — grasp / release / retry keyframes:
-      The grip verb (close / open / release / re-grasp / pick) takes
-      ABSOLUTE PRIORITY over pose delta in `action`. Always start the
-      sentence with the grip verb. You MAY add a pose qualifier in a
-      subordinate clause IF it fits within 12 words.
-        ✓ "Close the gripper to grasp the marker"
+
+ACTION STYLE GUIDE:
+
+    GRASP / RELEASE / RETRY keyframes:
+        The grip verb (close / open / release / re-grasp / pick) takes PRIORITY over other.
         ✓ "Close the gripper to grasp the marker while pitching down 4°"
-        ✗ "Yaw slightly while moving closer to the sink"        (release frame)
-        ✗ "Pitch downward and move closer to the cube"           (grasp frame)
 
-    TIER B — INTERACTION / FINE-TUNING motion keyframes
-      (the gripper is APPROACHING a target object for interaction, OR
+    TRANSPORT / RETRACT motion keyframes
+      
+      the gripper is moving FREELY between scene regions — lifting
+      from a table to a shelf, carrying an object across the workspace,
+      retracting after release. The per-keyframe Δ here is just one
+      sample of continuous motion, not a commanded waypoint.:
+        Describe direction + scene-landmark relation (qualitative):
+          ✓ "Lift the candy bar up to the shelf level"
+          ✓ "Head towards 9 o'clock in camera view and descend to get closer to the candy."
+          ✗ "Approach the candy on the table" (which direction? how to approach?)
+        You MAY name an axis without a number ("lift while yawing
+        toward the pot"). When use bare numbers like "translate 12 cm",
+        make sure it's helpful in reaching the target state.
+        NEVER write only "adjust the arm" — you must say WHICH
+        direction and WHAT scene landmark it's relative to.
+
+    INTERACTION / FINE-TUNING motion keyframes
+
+      The gripper is APPROACHING a target object for interaction, OR
       making precise corrections to align with it. This includes:
         - the 1-3 keyframes immediately before a grasp/release
         - any keyframe where the gripper is adjusting its ORIENTATION
           to match the target (e.g. rotating to be perpendicular)
         - any keyframe where a small position correction brings the
           gripper closer to a precise interaction point
-      Use AXIS-AWARE vocabulary with numbers. These numbers are
-      meaningful because they describe "how much more motion is needed
-      to reach the target configuration" — a useful policy signal.
-
+    
       The input Δ for TIER_B pre_grasp / pre_release keyframes is a
       **gap-to-interaction-pose**: the distance/rotation from HERE to the
-      actual grasp/release moment. This is the real control target, not
-      a sampling step. Use it directly.
+      actual grasp/release moment.
 
-      **Pre-grasp** (tag `TIER_B:pre_grasp`):
+      Use AXIS-AWARE vocabulary with numbers. These numbers are meaningful because they describe "how much motion the human demonstration does".
+
+      **Pre-grasp** (tag `pre_grasp`):
           ✓ "Right 1.7 cm, pitch forward 2° to align jaws with bottle neck"
           ✓ "Lower 3 cm to reach the block; approach from the left to clear adjacent piece"
           ✗ "Position fingers around object and begin grasp closure" (ZERO information)
           ✗ "Survey scene and begin approach" (filler phrase)
 
-      **Pre-release** (tag `TIER_B:pre_release`):
+      **Pre-release** (tag `pre_release`):
           ✓ "Lower 5 cm to seat the marker just above the pot opening"
           ✓ "Forward 2 cm to center above the bowl rim before releasing"
           ✗ "Prepare to release the object" (filler)
@@ -150,139 +180,63 @@ HARD RULES:
           ✓ "Lift 2 cm to clear the table with the grasped cube"
           ✓ "Retract 3 cm above the pot rim"
 
-    TIER C — TRANSPORT / RETRACT motion keyframes
-      (the gripper is moving FREELY between scene regions — lifting
-      from a table to a shelf, carrying an object across the workspace,
-      retracting after release. The per-keyframe Δ here is just one
-      sample of continuous motion, not a commanded waypoint.):
-        Describe direction + scene-landmark relation (qualitative):
-          ✓ "Lift the candy bar up to the shelf level"
-          ✓ "Carry the cube leftward over the counter toward the towel"
-          ✓ "Retract upward away from the pot"
-          ✓ "Ascend steeply from counter height to reach the shelf"
-        You MAY name an axis without a number ("lift while yawing
-        toward the pot"). Avoid bare numbers like "translate 12 cm"
-        — they over-claim intent.
-        NEVER write only "adjust the arm" — you must say WHICH
-        direction and WHAT scene landmark it's relative to.
+THINK STYLE GUIDANCE:
 
-    How to decide TIER B vs C: look at the **TIER_B** tag in the input.
-      - If a keyframe's metadata line contains **TIER_B**, use TIER B.
-        These keyframes are within ±2 positions of a grasp/release/retry
-        and are likely in an interaction approach or fine-tune phase.
-      - If **TIER_B** is absent, use TIER C (qualitative + landmark).
-      The tag is provided by the detector — you do NOT need to guess.
+        think happen when 
+        - type=retry (REQUIRED — explain failure cause + corrective approach)
+        - multi-step planning decision ('picking leftmost first to free space')
+        - obstacle / orientation choice ('lifting higher to clear the bowl')
+        - reasoning about invisible info ('target is the pot because we are holding the marker')
 
-  R7. No negative reasoning ("the robot did NOT…"). Describe what is.
 
-  R8. Plan ≤ 5 sentences. Stage ≤ 40 words. Action ≤ 12 words.
+ADDITIONAL GUIDANCE:
 
-  R12 (INFORMATION DENSITY — every word must carry positional or semantic info):
+    AFFORDANCE at grasp/pre-grasp: describe WHICH PART of the
+        object the gripper targets:
+        ✓ "Align jaws with the narrow neck of the bottle"
+        ✓ "Grip the mug handle from the right side"
+        ✓ "Approach the front half of the yellow block — rear half
+            is blocked by the adjacent blue piece"
+        ✗ "Position fingers around target block" (which part? why?)
+        ✗ "Gripper surrounding yellow mug body" (where on the body?)
 
-    R12a. ZERO FILLER. These phrases are BANNED because they carry no
-          positional information:
-            ✗ "Survey scene and begin approach"
-            ✗ "Position fingers around object"
-            ✗ "Prepare to re-engage object"
-            ✗ "Begin grasp closure"
-          Replace with WHAT specifically: direction, distance, object part.
+    SPATIAL CONSTRAINTS from nearby objects. If something limits
+        the approach angle or gripper orientation, name it:
+        ✓ "Approach from the left to clear the adjacent LEGO brick"
+        ✓ "Grip the bottle at the 2/3 height mark, avoiding the cap"
+        ✗ "Arm hovering near the microwave zone" (is the microwave
+            actually constraining the motion? if not, don't mention it)
 
-    R12b. AFFORDANCE at grasp/pre-grasp: describe WHICH PART of the
-          object the gripper targets and WHY:
-            ✓ "Align jaws with the narrow neck of the bottle"
-            ✓ "Grip the mug handle from the right side"
-            ✓ "Approach the front half of the yellow block — rear half
-               is blocked by the adjacent blue piece"
-            ✗ "Position fingers around target block" (which part? why?)
-            ✗ "Gripper surrounding yellow mug body" (where on the body?)
+    WHICH SUBJECTIVE DIRECTION
+    When describing direction, you have scene landmarks and bare
+    move left/right/forward/backward:
+      Scene landmarks style:  "away from the shelf", "over the counter edge"
+      Bare move style: "Head towards 9 o'clock"
+    When using left/right, clearly tell it refers to the **camera's point
+    of view** (what appears left/right in the image)or the main view to avoid ambiguity. This is consistent within one episode but may differ across episodes filmed from
+    different angles. 
 
-    R12c. SPATIAL CONSTRAINTS from nearby objects. If something limits
-          the approach angle or gripper orientation, name it:
-            ✓ "Approach from the left to clear the adjacent LEGO brick"
-            ✓ "Grip the bottle at the 2/3 height mark, avoiding the cap"
-            ✗ "Arm hovering near the microwave zone" (is the microwave
-               actually constraining the motion? if not, don't mention it)
 
-    R12d. STAGE writing formula — three elements, in this order:
-          1. SUBJECT + CURRENT POSITION (relative to scene, not raw numbers)
-          2. TARGET STATE (what configuration the gripper is trying to reach)
-          3. HOW / remaining gap (only for contact-rich fine-tune)
+HARD RULES:
+  R1. keyframes length = input keyframe count, in same order, same frame_idx.
 
-          FAR from target (transport/approach):
-            ✓ "Gripper in the upper-right of the frame, descending
-               toward the bottle cluster on the counter."
-            ✓ "Arm carrying the marker leftward over the table, pot
-               visible ahead at the left edge."
-            ✗ "+2.1 cm right, +1.6 cm back, +7.7 cm up with 13°
-               compound" (raw delta dump — NEVER do this)
+  R2. mode_marker MUST be "[think_act]" on every keyframe (downstream
+      training will sample sub-modes).
 
-          NEAR target (contact-rich fine-tune):
-            ✓ "Slight CCW yaw then lower will center the cup rim
-               between the jaws."
-            ✓ "Jaws straddling the bottle neck; 1 cm lower to reach
-               the mid-body grasp height."
-            ✗ "Near-interaction. +1.7 cm right, +0.2 cm up with 2°
-               pitch" (copying input metadata format into stage)
+  R3. stage could contain image-invisible context but could infer due to causality across keyframes
+      (done plan progress / past event / counter / cross-step causality).
 
-          NEVER use the word "compound" in stage — it's an internal
-          axis classification. If rotation is multi-axis, describe
-          what it ACHIEVES: "reorienting to face downward" not "13°
-          compound rotation".
+  R4. Reference length: Plan ≤ 5 sentences. Stage ≤ 40 words. Action ≤ 20 words.
 
-          NEVER start a stage sentence with raw numbers. Start with
-          the gripper's relation to scene objects.
 
-  R9. Δxyz / Δrot semantics: the values describe the motion that happens
-      BETWEEN this keyframe and the NEXT keyframe (forward-looking, in
-      the direction of time). For TIER B (fine-tuning) the Δ is close
-      to a commanded waypoint and is informative. For TIER C (transport)
-      the Δ is incidental sampling — use it only to pick the dominant
-      axis name, not to copy specific numbers into `action`.
+    R5. Δxyz / Δrot semantics: the values describe the motion that happens
+        BETWEEN this keyframe and the NEXT keyframe (forward-looking, in
+        the direction of time). For TIER B (fine-tuning) the Δ is close
+        to a commanded waypoint and is informative. For TIER C (transport)
+        the Δ is incidental sampling — use it only to pick the dominant
+        axis name, not to copy specific numbers into `action`.
 
-  R10 (spatial orientation convention):
-    When describing direction, PREFER scene landmarks over bare
-    left/right/forward/backward:
-      ✓ "toward the sink", "away from the shelf", "over the counter edge"
-      ✗ "to the left", "moving forward" (ambiguous — left of what?)
-    When left/right is unavoidable, it refers to the **camera's point
-    of view** (what appears left/right in the image). This is consistent
-    within one episode but may differ across episodes filmed from
-    different angles. Scene landmarks are preferred because they
-    remain unambiguous regardless of camera placement.
 
-  R11 (stage style — CRITICAL for uniqueness & spatial grounding):
-
-    R11a. SPATIAL UNIQUENESS: each `stage` MUST be specific enough that
-          a reader could identify WHICH keyframe it belongs to without
-          seeing the frame index. Use spatial landmarks:
-            - height relative to scene ("just above the counter", "at
-              shelf level", "risen past the sink rim")
-            - horizontal position ("centered over the pot opening",
-              "at the left side of the shelf")
-            - gripper orientation state ("jaws perpendicular to counter",
-              "opening facing down toward the marker")
-            - object interaction state ("candy bar secured in gripper",
-              "marker resting in the pot")
-          ✗ "The robot continues adjusting its position."  (could be any of 5 keyframes)
-          ✗ "The arm swings back and pitches upward, gaining significant height."  (vague — "significant" is not a landmark)
-          ✓ "The gripper has risen above the sink rim and is now level with the bottom shelf, carrying the candy bar."  (uniquely identifiable)
-          ✓ "Just above the counter, the gripper pitches forward to orient its jaws perpendicular for a top-down grasp."
-
-    R11b. NUMBERS IN STAGE — gap-to-target OK, raw deltas NOT OK.
-          Numbers that describe "how far from a target configuration"
-          are GOOD because they anchor the state uniquely:
-            ✓ "The gripper needs 39° more pitch to be perpendicular to the counter."
-            ✓ "The gripper hovers 2 cm above the candy bar, ready to close."
-          Numbers that describe raw motion (copied from Δxyz/Δrot) are
-          NOT useful in stage — they're sampling artifacts, not state:
-            ✗ "Carrying the Doritos 22cm sideways toward the sink basin."
-            ✗ "The arm has moved 15cm upward from the table."
-
-    R11c. Plan-step references are OPTIONAL. Prefer scene-relational
-          descriptions over plan labels. Use plan-step only when it
-          carries image-invisible info (retry count, which-attempt).
-          ✗ "Plan step 4 transport phase: the robot moves toward the sink."
-          ✓ "Having grasped the Doritos, the gripper rises over the counter edge toward the sink."
 """
 
 

@@ -92,26 +92,32 @@ def annotate_episode(
             cur_pose = bundle.ee_pose[kf.t]
             ctx = interaction_context[i]
 
+            # Forward delta to next keyframe (always computed)
+            if i + 1 < len(keyframes):
+                next_pose = bundle.ee_pose[keyframes[i + 1].t]
+            else:
+                next_pose = cur_pose
+            fwd = pose_delta(next_pose, cur_pose)
+
             if ctx and ctx.startswith("pre_"):
-                # Find the target interaction keyframe ahead
-                target_type = ctx.split("_", 1)[1]  # "grasp" or "release"
+                # Pre-interaction: provide BOTH deltas.
+                # - gap-to-interaction: for stage (distance to target config)
+                # - next-step: for action (what the demo actually does next)
+                target_type = ctx.split("_", 1)[1]
                 target_pose = None
                 for j in range(i + 1, len(keyframes)):
                     if keyframes[j].type == target_type:
                         target_pose = bundle.ee_pose[keyframes[j].t]
                         break
                 if target_pose is not None:
-                    d = pose_delta(target_pose, cur_pose)
-                    pose_deltas_str[i] = f"gap-to-{target_type}: {d}"
+                    gap = pose_delta(target_pose, cur_pose)
+                    pose_deltas_str[i] = (
+                        f"gap-to-{target_type}: {gap}\n"
+                        f"    next-step: {fwd}"
+                    )
                     continue
 
-            # Default: forward delta to next keyframe
-            if i + 1 < len(keyframes):
-                next_pose = bundle.ee_pose[keyframes[i + 1].t]
-            else:
-                next_pose = cur_pose
-            d = pose_delta(next_pose, cur_pose)
-            pose_deltas_str[i] = str(d)
+            pose_deltas_str[i] = str(fwd)
 
     # 2b. Tag near-interaction keyframes (within ±2 of grasp/release/retry).
     # The prompt tells the VLM: near_interaction=true → TIER B (fine-tune

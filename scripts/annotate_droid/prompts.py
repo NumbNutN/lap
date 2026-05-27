@@ -44,19 +44,28 @@ You receive:
        retry/motion/filler/end)
      - gripper_state: open / partial / closed
      - an external camera image (+ optional wrist image)
-     - **TIER_B tag** (present on keyframes within ±2 of a grasp/release,
-       with a sub-label like `TIER_B:pre_grasp` or `TIER_B:pre_release`)
-     - **Pose delta** — the meaning depends on the tag:
-         • `TIER_B:pre_grasp` / `TIER_B:pre_release`:
-           the delta is a **gap-to-interaction-pose** — how far from
-           HERE to the actual grasp/release EE configuration. This is
-           the real control target ("3 cm lower + 5° pitch to reach
-           the grasp pose on the bottle neck").
-         • All other keyframes (transport, retract, begin, end):
-           the delta is a **forward step** — motion from this keyframe
-           to the next. This is a sampling artifact of continuous
-           motion, not a commanded waypoint. Use it only to identify
-           the dominant direction, not to copy numbers.
+     - **Interaction context tag** (when present): `pre_grasp`,
+       `pre_release`, `post_grasp`, `post_release` — indicates this
+       keyframe is near a grasp/release event.
+     - **Pose deltas** — one or two lines depending on context:
+
+       For keyframes tagged `pre_grasp` or `pre_release`, you get TWO:
+         gap-to-grasp: Δxyz=(...) Δrot=...   ← distance from HERE to
+             the grasp/release EE pose. Use this in **stage** to
+             describe how far the gripper is from the target config.
+         next-step:    Δxyz=(...) Δrot=...   ← what the human demo
+             does in the next segment. Use this in **action** to
+             describe what motion to execute (this IS the demonstration).
+
+       For all other keyframes (transport, retract, begin, end):
+         A single forward-step delta (motion to the next keyframe).
+         This is a sample of continuous motion, not a commanded
+         waypoint — use it to identify the dominant direction and
+         approximate magnitude, not to copy exact numbers.
+
+       Rotation format: single-axis rotations show e.g. "11° pitch".
+       Multi-axis rotations are decomposed, e.g. "≈8° pitch+5° yaw"
+       (the top 2 contributing axes).
 
 You emit per-keyframe annotations as a SEQUENCE (in order), so each
 annotation may reference earlier annotations in this same response as
@@ -151,7 +160,7 @@ ACTION STYLE GUIDE:
     There's two style reference
 
     1. The movement has a clear relative goal
-    It's welcome to use the Δpose to describe action, use axis-aware vocabulary with numbers.
+    It's welcome to use the Δnext-step to describe action, use axis-aware vocabulary with numbers.
     ✓ "leftward 5.6cm, forward 3.6cm and lower 2.1cm, yawing counterclockwise 13° to align the handle of the mug with the gripper jaws"
 
     2. The gripper is moving FREELY between scene regions - precise pose is not critical, the keyframe is just a sample of continuous motion, you just describe the trend direction, like "move forward and upward with yaw clockwise to approach the bottle cluster"
@@ -174,11 +183,12 @@ ACTION STYLE GUIDE:
         - any keyframe where a small position correction brings the
           gripper closer to a precise interaction point
     
-      The input Δ for TIER_B pre_grasp / pre_release keyframes is a
-      **gap-to-interaction-pose**: the distance/rotation from HERE to the
-      actual grasp/release moment.
+      For pre_grasp / pre_release keyframes, two deltas are provided:
+        - gap-to-interaction: use in stage to describe distance to target
+        - next-step: use in action to describe the demo's next motion
 
-      Use AXIS-AWARE vocabulary with numbers. These numbers are meaningful because they describe "how much motion to go".
+      Use AXIS-AWARE vocabulary with numbers from next-step. These
+      numbers describe the actual human demonstration motion.
 
       **Pre-grasp** (tag `pre_grasp`):
           ✓ "Right 1.7 cm, pitch forward 2° to align jaws with bottle neck"
@@ -245,9 +255,11 @@ HARD RULES:
   R4. Reference length: Plan ≤ 5 sentences. Stage ≤ 40 words. Action ≤ 20 words.
 
 
-    R5. Δ semantics are explained in the "You receive" section above.
-        TIER_B deltas = gap-to-interaction-pose (meaningful target).
-        Other deltas = forward step (sampling artifact, use for direction only).
+    R5. Δ semantics — see "You receive" section above.
+        Pre-interaction keyframes get TWO deltas:
+          - gap-to-interaction → for stage (state description)
+          - next-step → for action (demo motion to imitate)
+        Other keyframes get one forward-step delta → for action direction.
 
 
 """
@@ -449,36 +461,46 @@ FEWSHOT_USER = {
 FEWSHOT_V3_USER = {
     "task_instruction": "Put the marker in the pot",
     "keyframes_meta": [
+        # begin — single forward-step delta
         {"frame_idx": 0,   "type": "begin",   "gripper_state": "open",
-         "pose_delta_str": "Δxyz=(+1.3cm,+1.8cm,-3.6cm)  Δrot=2° around mixed-axis"},
+         "pose_delta_str": "Δxyz=(+1.3cm,+1.8cm,-3.6cm)  Δrot≈2° pitch"},
+        # transport approach — single forward-step
         {"frame_idx": 11,  "type": "motion",  "gripper_state": "open",
-         "pose_delta_str": "Δxyz=(+15.3cm,+5.2cm,-20.7cm)  Δrot=13° around mixed-axis"},
+         "pose_delta_str": "Δxyz=(+15.3cm,+5.2cm,-20.7cm)  Δrot≈9° pitch+5° yaw"},
+        # pre_grasp — DUAL delta: gap-to-grasp + next-step
         {"frame_idx": 27,  "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "pre_grasp",
-         "pose_delta_str": "gap-to-grasp: Δxyz=(+6.7cm,-0.4cm,-16.0cm)  Δrot=14° around pitch"},
+         "pose_delta_str": "gap-to-grasp: Δxyz=(+6.7cm,-0.4cm,-16.0cm)  Δrot=14° pitch\n    next-step: Δxyz=(+3.9cm,-0.5cm,-5.3cm)  Δrot≈3° pitch+1° yaw"},
         {"frame_idx": 35,  "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "pre_grasp",
-         "pose_delta_str": "gap-to-grasp: Δxyz=(+2.8cm,+0.1cm,-10.7cm)  Δrot=11° around pitch"},
+         "pose_delta_str": "gap-to-grasp: Δxyz=(+2.8cm,+0.1cm,-10.7cm)  Δrot=11° pitch\n    next-step: Δxyz=(+2.8cm,+0.1cm,-10.7cm)  Δrot=11° pitch"},
+        # grasp — single delta
         {"frame_idx": 59,  "type": "grasp",   "gripper_state": "open",
          "near_interaction": True,
-         "pose_delta_str": "Δxyz=(+0.5cm,+1.0cm,-0.1cm)  Δrot=1° around mixed-axis"},
+         "pose_delta_str": "Δxyz=(+0.5cm,+1.0cm,-0.1cm)  Δrot≈0°"},
+        # post_grasp — single forward-step
         {"frame_idx": 67,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "post_grasp",
-         "pose_delta_str": "Δxyz=(+0.6cm,-0.2cm,+0.7cm)  Δrot=1° around -yaw"},
+         "pose_delta_str": "Δxyz=(+0.6cm,-0.2cm,+0.7cm)  Δrot=1° -yaw"},
+        # transport — single forward-step
         {"frame_idx": 75,  "type": "motion",  "gripper_state": "closed",
-         "pose_delta_str": "Δxyz=(-0.5cm,-1.4cm,+11.2cm)  Δrot=12° around -yaw"},
+         "pose_delta_str": "Δxyz=(-0.5cm,-1.4cm,+11.2cm)  Δrot=12° -yaw"},
+        # pre_release — DUAL delta
         {"frame_idx": 87,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "pre_release",
-         "pose_delta_str": "gap-to-release: Δxyz=(-11.6cm,-9.9cm,-5.1cm)  Δrot=17° around -yaw"},
+         "pose_delta_str": "gap-to-release: Δxyz=(-11.6cm,-9.9cm,-5.1cm)  Δrot≈12° yaw+6° roll\n    next-step: Δxyz=(-5.0cm,-5.9cm,-0.6cm)  Δrot≈8° yaw+4° roll"},
         {"frame_idx": 97,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "pre_release",
-         "pose_delta_str": "gap-to-release: Δxyz=(-6.6cm,-4.0cm,-4.5cm)  Δrot=9° around -roll"},
+         "pose_delta_str": "gap-to-release: Δxyz=(-6.6cm,-4.0cm,-4.5cm)  Δrot≈7° roll+3° yaw\n    next-step: Δxyz=(-6.6cm,-4.0cm,-4.5cm)  Δrot≈7° roll+3° yaw"},
+        # release — single delta
         {"frame_idx": 134, "type": "release", "gripper_state": "closed",
          "near_interaction": True,
-         "pose_delta_str": "Δxyz=(-0.0cm,+0.2cm,-0.1cm)  Δrot=0° around mixed-axis"},
+         "pose_delta_str": "Δxyz=(-0.0cm,+0.2cm,-0.1cm)  Δrot≈0°"},
+        # post_release — single forward-step
         {"frame_idx": 145, "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "post_release",
-         "pose_delta_str": "Δxyz=(-2.6cm,+3.2cm,+5.3cm)  Δrot=5° around mixed-axis"},
+         "pose_delta_str": "Δxyz=(-2.6cm,+3.2cm,+5.3cm)  Δrot≈3° pitch+2° yaw"},
+        # end — no delta
         {"frame_idx": 165, "type": "end",     "gripper_state": "open",
          "pose_delta_str": ""},
     ],
@@ -511,15 +533,19 @@ FEWSHOT_V3_ASSISTANT = {
         {
             "frame_idx": 27,
             "mode_marker": "[think_act]",
-            "stage": "Gripper now visible at roughly table height, 7 cm forward and 16 cm above the grasp pose. Needs 14° more pitch to point jaws straight down at the marker barrel.",
-            "think": "Marker is thin (~1 cm diameter) and lying flat — a top-down barrel grasp along its length requires near-vertical pitch.",
-            "action": "Lower 16 cm and pitch down 14° to align with the marker barrel.",
+            # stage uses gap-to-grasp: "16 cm above + 14° pitch remaining"
+            "stage": "Gripper at table height, 16 cm above and 14° pitch from the grasp pose on the marker barrel. Jaws need near-vertical orientation for the flat-lying marker.",
+            "think": "Marker is thin (~1 cm) and lying flat — top-down barrel grasp along its length requires near-vertical pitch.",
+            # action uses next-step: "lower 5 cm, pitch 3°" (not the full gap)
+            "action": "Lower 5 cm and pitch 3° toward the marker.",
         },
         {
             "frame_idx": 35,
             "mode_marker": "[think_act]",
-            "stage": "Gripper just above the marker, 11 cm and 11° pitch remaining to the grasp pose. Jaws open, oriented nearly vertical.",
+            # stage uses gap-to-grasp: "11 cm + 11° remaining"
+            "stage": "Gripper just above the marker, 11 cm and 11° pitch remaining to the grasp pose. Jaws open, nearly vertical.",
             "think": None,
+            # action uses next-step (here gap=next-step, last pre-grasp frame)
             "action": "Lower 11 cm and pitch 11° to reach the marker.",
         },
         {
@@ -546,15 +572,19 @@ FEWSHOT_V3_ASSISTANT = {
         {
             "frame_idx": 87,
             "mode_marker": "[think_act]",
-            "stage": "Gripper hovering above the pot, 12 cm left and 5 cm above the release pose inside the pot. The pot opening is directly below.",
+            # stage uses gap-to-release: "12 cm left, 5 cm above release pose"
+            "stage": "Gripper carrying marker above the pot, 12 cm left and 5 cm above the release pose inside the pot opening.",
             "think": None,
-            "action": "Translate 12 cm right and lower 5 cm toward the pot opening.",
+            # action uses next-step: "5 cm right + 1 cm lower" (one segment, not full gap)
+            "action": "Shift 5 cm right and lower 1 cm, yaw 8° CW toward the pot.",
         },
         {
             "frame_idx": 97,
             "mode_marker": "[think_act]",
-            "stage": "Marker positioned just above the pot rim, 7 cm left and 5 cm above the release point. Nearly centered over the opening.",
+            # stage uses gap-to-release: "7 cm left, 5 cm above"
+            "stage": "Marker just above the pot rim, 7 cm left and 5 cm above the release point. Nearly centered.",
             "think": None,
+            # action uses next-step (here gap=next-step, last pre-release)
             "action": "Lower 5 cm and shift 7 cm right to center in the pot.",
         },
         {

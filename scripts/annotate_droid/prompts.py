@@ -38,12 +38,25 @@ single-arm Franka Panda robot manipulation episode from the DROID dataset.
 
 You receive:
   1. Natural-language task instruction.
-  2. A list of KEYFRAMES — each with: frame index, type label from a
-     rule-based detector (begin/grasp/release/retry/motion/filler/end),
-     observed gripper state (open/partial/closed), an external camera
-     image, an optional wrist camera image, and a POSE DELTA from the
-     previous keyframe formatted as Δxyz (cm) + Δrot (deg around
-     yaw/pitch/roll/compound).
+  2. A list of KEYFRAMES — each with:
+     - frame_idx: integer frame number
+     - type: from a rule-based gripper detector (begin/grasp/release/
+       retry/motion/filler/end)
+     - gripper_state: open / partial / closed
+     - an external camera image (+ optional wrist image)
+     - **TIER_B tag** (present on keyframes within ±2 of a grasp/release,
+       with a sub-label like `TIER_B:pre_grasp` or `TIER_B:pre_release`)
+     - **Pose delta** — the meaning depends on the tag:
+         • `TIER_B:pre_grasp` / `TIER_B:pre_release`:
+           the delta is a **gap-to-interaction-pose** — how far from
+           HERE to the actual grasp/release EE configuration. This is
+           the real control target ("3 cm lower + 5° pitch to reach
+           the grasp pose on the bottle neck").
+         • All other keyframes (transport, retract, begin, end):
+           the delta is a **forward step** — motion from this keyframe
+           to the next. This is a sampling artifact of continuous
+           motion, not a commanded waypoint. Use it only to identify
+           the dominant direction, not to copy numbers.
 
 You emit per-keyframe annotations as a SEQUENCE (in order), so each
 annotation may reference earlier annotations in this same response as
@@ -229,12 +242,9 @@ HARD RULES:
   R4. Reference length: Plan ≤ 5 sentences. Stage ≤ 40 words. Action ≤ 20 words.
 
 
-    R5. Δxyz / Δrot semantics: the values describe the motion that happens
-        BETWEEN this keyframe and the NEXT keyframe (forward-looking, in
-        the direction of time). For TIER B (fine-tuning) the Δ is close
-        to a commanded waypoint and is informative. For TIER C (transport)
-        the Δ is incidental sampling — use it only to pick the dominant
-        axis name, not to copy specific numbers into `action`.
+    R5. Δ semantics are explained in the "You receive" section above.
+        TIER_B deltas = gap-to-interaction-pose (meaningful target).
+        Other deltas = forward step (sampling artifact, use for direction only).
 
 
 """
@@ -423,117 +433,147 @@ FEWSHOT_USER = {
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# v4.1 fewshot — REAL episode (ep00 "Put the marker in the pot") grounded
+# in actual DROID images. This is not fabricated — every stage description
+# matches what is visible in the extracted keyframe JPEGs.
+#
+# Scene: wooden table in a lab, small stainless pot center-right, thin
+# cylindrical marker lying on the table surface (barely visible due to
+# small size), wooden box as backdrop, lab clutter around.
+# ---------------------------------------------------------------------------
+
 FEWSHOT_V3_USER = {
-    "task_instruction": "Pick up the blue cube and place it on the towel",
+    "task_instruction": "Put the marker in the pot",
     "keyframes_meta": [
         {"frame_idx": 0,   "type": "begin",   "gripper_state": "open",
-         "pose_delta_str": "Δxyz=(+3.2cm,-1.1cm,-1.5cm)  Δrot=4° around -yaw"},
-        {"frame_idx": 22,  "type": "motion",  "gripper_state": "open",
+         "pose_delta_str": "Δxyz=(+1.3cm,+1.8cm,-3.6cm)  Δrot=2° around mixed-axis"},
+        {"frame_idx": 11,  "type": "motion",  "gripper_state": "open",
+         "pose_delta_str": "Δxyz=(+15.3cm,+5.2cm,-20.7cm)  Δrot=13° around mixed-axis"},
+        {"frame_idx": 27,  "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "pre_grasp",
-         "pose_delta_str": "Δxyz=(+1.0cm,-0.4cm,-6.8cm)  Δrot=2° around pitch"},
-        {"frame_idx": 41,  "type": "motion",  "gripper_state": "open",
+         "pose_delta_str": "gap-to-grasp: Δxyz=(+6.7cm,-0.4cm,-16.0cm)  Δrot=14° around pitch"},
+        {"frame_idx": 35,  "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "pre_grasp",
-         "pose_delta_str": "Δxyz=(+0.3cm,-0.2cm,-0.4cm)  Δrot=11° around -yaw"},
-        {"frame_idx": 55,  "type": "grasp",   "gripper_state": "closed",
+         "pose_delta_str": "gap-to-grasp: Δxyz=(+2.8cm,+0.1cm,-10.7cm)  Δrot=11° around pitch"},
+        {"frame_idx": 59,  "type": "grasp",   "gripper_state": "open",
          "near_interaction": True,
-         "pose_delta_str": "Δxyz=(+0.2cm,+0.1cm,+0.0cm)  Δrot=3° around pitch"},
-        {"frame_idx": 80,  "type": "motion",  "gripper_state": "closed",
+         "pose_delta_str": "Δxyz=(+0.5cm,+1.0cm,-0.1cm)  Δrot=1° around mixed-axis"},
+        {"frame_idx": 67,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "post_grasp",
-         "pose_delta_str": "Δxyz=(-2.4cm,+4.8cm,+5.6cm)  Δrot=6° around yaw"},
-        {"frame_idx": 95,  "type": "motion",  "gripper_state": "closed",
+         "pose_delta_str": "Δxyz=(+0.6cm,-0.2cm,+0.7cm)  Δrot=1° around -yaw"},
+        {"frame_idx": 75,  "type": "motion",  "gripper_state": "closed",
+         "pose_delta_str": "Δxyz=(-0.5cm,-1.4cm,+11.2cm)  Δrot=12° around -yaw"},
+        {"frame_idx": 87,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "pre_release",
-         "pose_delta_str": "Δxyz=(+0.1cm,+0.0cm,-3.0cm)  Δrot=1° around pitch"},
-        {"frame_idx": 105, "type": "release", "gripper_state": "open",
+         "pose_delta_str": "gap-to-release: Δxyz=(-11.6cm,-9.9cm,-5.1cm)  Δrot=17° around -yaw"},
+        {"frame_idx": 97,  "type": "motion",  "gripper_state": "closed",
+         "near_interaction": True, "interaction_context": "pre_release",
+         "pose_delta_str": "gap-to-release: Δxyz=(-6.6cm,-4.0cm,-4.5cm)  Δrot=9° around -roll"},
+        {"frame_idx": 134, "type": "release", "gripper_state": "closed",
          "near_interaction": True,
-         "pose_delta_str": "Δxyz=(+0.5cm,-0.1cm,-0.2cm)  Δrot=1° around pitch"},
-        {"frame_idx": 124, "type": "end",     "gripper_state": "open",
-         "pose_delta_str": "Δxyz=(+0.0cm,+0.0cm,+0.0cm)  Δrot=0° around yaw"},
+         "pose_delta_str": "Δxyz=(-0.0cm,+0.2cm,-0.1cm)  Δrot=0° around mixed-axis"},
+        {"frame_idx": 145, "type": "motion",  "gripper_state": "open",
+         "near_interaction": True, "interaction_context": "post_release",
+         "pose_delta_str": "Δxyz=(-2.6cm,+3.2cm,+5.3cm)  Δrot=5° around mixed-axis"},
+        {"frame_idx": 165, "type": "end",     "gripper_state": "open",
+         "pose_delta_str": ""},
     ],
 }
 
 
 FEWSHOT_V3_ASSISTANT = {
     "plan": (
-        "The robot picks up the blue cube and places it on the towel. "
-        "1) Approach the cube. 2) Lower and align the gripper. "
-        "3) Close around the cube. 4) Lift and carry it over the towel. "
-        "5) Release. 6) Retract."
+        "Put the marker in the pot. 1) Approach the marker on the wooden "
+        "table from the rear-left. 2) Lower and pitch to align jaws with "
+        "the thin cylindrical marker. 3) Grasp the marker barrel. "
+        "4) Lift clear of the table and arc toward the pot. "
+        "5) Lower into the pot opening and release. 6) Retract."
     ),
-    # Style guide for reader (NOT part of JSON):
-    #   - TIER A (grasp/release): grip verb only
-    #   - TIER B (approach interaction + fine-tune): precise numbers (gap-to-target)
-    #   - TIER C (transport/retract): qualitative + landmark relation
-    #   - stage: spatially unique, uses landmarks, gap-to-target numbers OK, raw-delta NO
     "keyframes": [
         {
             "frame_idx": 0,
             "mode_marker": "[think_act]",
-            # stage: SPATIALLY UNIQUE — ready pose + relative to table
-            "stage": "The gripper starts at a ready pose well above the table, with the blue cube visible near the left edge of the workspace.",
+            "stage": "Gripper at home pose, rear-left of scene, well above the wooden table. Pot sits center-right; marker is a thin dark cylinder lying flat on the table near the pot.",
             "think": None,
-            # TIER C — transport: qualitative direction + landmark
-            "action": "Descend from the ready pose toward the table surface.",
+            "action": "Head toward the table center, descending toward the marker.",
         },
         {
-            "frame_idx": 22,
+            "frame_idx": 11,
             "mode_marker": "[think_act]",
-            # stage: height-relative landmark → uniquely identifiable
-            "stage": "The gripper has descended to roughly tabletop height, directly above the blue cube, and is beginning lateral corrections to center over it.",
+            "stage": "Gripper entering the frame from upper-left, about 20 cm above the table, sweeping forward-right toward the marker region.",
             "think": None,
-            # TIER C→B transition: approaching but not yet fine-tuning
-            "action": "Lower toward the cube while centering laterally.",
+            "action": "Continue steep descent toward the table surface near the marker.",
         },
         {
-            "frame_idx": 41,
+            "frame_idx": 27,
             "mode_marker": "[think_act]",
-            # stage: affordance — WHY this yaw (cube edge alignment)
-            "stage": "Jaws 11° off from the cube's long edge; cube sits near the table corner so approach from above-left avoids the table rim.",
-            "think": "Cube is flush with the table edge on the right side — approaching from above-left gives the cleanest jaw clearance.",
-            # TIER B — pre-grasp: gap-to-grasp-pose + affordance
-            "action": "Yaw 11° CCW to align jaws with the cube's long edge.",
+            "stage": "Gripper now visible at roughly table height, 7 cm forward and 16 cm above the grasp pose. Needs 14° more pitch to point jaws straight down at the marker barrel.",
+            "think": "Marker is thin (~1 cm diameter) and lying flat — a top-down barrel grasp along its length requires near-vertical pitch.",
+            "action": "Lower 16 cm and pitch down 14° to align with the marker barrel.",
         },
         {
-            "frame_idx": 55,
+            "frame_idx": 35,
             "mode_marker": "[think_act]",
-            # stage: WHERE on the cube (affordance)
-            "stage": "Jaws centered on the cube's mid-height; top-down grasp on the flat top face, 1 cm to close.",
+            "stage": "Gripper just above the marker, 11 cm and 11° pitch remaining to the grasp pose. Jaws open, oriented nearly vertical.",
             "think": None,
-            # TIER A — grasp: grip verb + object part
-            "action": "Close the gripper on the cube's flat top face.",
+            "action": "Lower 11 cm and pitch 11° to reach the marker.",
         },
         {
-            "frame_idx": 80,
+            "frame_idx": 59,
             "mode_marker": "[think_act]",
-            # stage: uses height landmark (above workspace, towel visible)
-            "stage": "With the cube secured, the gripper has risen well above the table and is arcing leftward; the towel is visible below and to the left.",
+            "stage": "Jaws bracketing the marker barrel at table level. Near-zero gap — ready to close.",
             "think": None,
-            # TIER C — transport: qualitative + landmark
-            "action": "Arc leftward over the table toward the towel.",
+            "action": "Close the gripper on the marker barrel.",
         },
         {
-            "frame_idx": 95,
+            "frame_idx": 67,
             "mode_marker": "[think_act]",
-            # TIER_B:pre_release — precise final positioning before release
-            "stage": "Directly above the towel center, the gripper holds the cube 3 cm above the cloth surface, almost at placement height.",
+            "stage": "Marker secured in the gripper at table height. Beginning to lift clear of the surface.",
             "think": None,
-            # TIER B — pre-release: axis + number + intent
-            "action": "Lower 3 cm to reach the towel surface before releasing.",
+            "action": "Lift 1 cm to clear the table surface with the marker.",
         },
         {
-            "frame_idx": 105,
+            "frame_idx": 75,
             "mode_marker": "[think_act]",
-            "stage": "The cube is now touching the towel. The gripper opens to complete the placement.",
+            "stage": "Gripper has risen about 11 cm above the table, marker in hand. Pot is below and to the right, about 12 cm away laterally.",
             "think": None,
-            # TIER A — release: grip verb
-            "action": "Open the gripper to release the cube onto the towel.",
+            "action": "Arc rightward and yaw CW toward the pot opening.",
         },
         {
-            "frame_idx": 124,
+            "frame_idx": 87,
             "mode_marker": "[think_act]",
-            # stage: final state + scene landmarks confirm task outcome
-            "stage": "The cube rests on the towel below. The gripper hovers slightly above with jaws open, task complete.",
+            "stage": "Gripper hovering above the pot, 12 cm left and 5 cm above the release pose inside the pot. The pot opening is directly below.",
             "think": None,
-            "action": "Remain at the release pose above the towel.",
+            "action": "Translate 12 cm right and lower 5 cm toward the pot opening.",
+        },
+        {
+            "frame_idx": 97,
+            "mode_marker": "[think_act]",
+            "stage": "Marker positioned just above the pot rim, 7 cm left and 5 cm above the release point. Nearly centered over the opening.",
+            "think": None,
+            "action": "Lower 5 cm and shift 7 cm right to center in the pot.",
+        },
+        {
+            "frame_idx": 134,
+            "mode_marker": "[think_act]",
+            "stage": "Marker inside the pot at the release position. Gripper opens to drop it.",
+            "think": None,
+            "action": "Open the gripper to release the marker into the pot.",
+        },
+        {
+            "frame_idx": 145,
+            "mode_marker": "[think_act]",
+            "stage": "Marker resting inside the pot. Gripper open, retracting upward and leftward away from the pot.",
+            "think": None,
+            "action": "Retract upward 5 cm and back away from the pot.",
+        },
+        {
+            "frame_idx": 165,
+            "mode_marker": "[think_act]",
+            "stage": "Gripper at rest above the table, task complete. Marker visible inside the pot.",
+            "think": None,
+            "action": "Hold at the rest pose.",
         },
     ],
 }
@@ -563,7 +603,7 @@ FEWSHOT_ASSISTANT = {
     "keyframes": [
         {
             "frame_idx": 0,
-            "stage": "Episode start. The gripper is open and far from the watermelon.",
+            "stage": "Episode start. The gripper is open. A watermelon is on the back and far from the watermelon.",
             "think": None,
             # grounded
             "action": "Approach the watermelon on the right side of the counter.",

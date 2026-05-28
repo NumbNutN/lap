@@ -152,6 +152,9 @@ STAGE STYLE GUIDE:
         ✗ "Begin grasp closure"
         Replace with WHAT specifically: direction, distance, object part.
 
+    TIP: NOTE CAUSALITY.Pose deltas next-step is a to go action. If you can infer the relative position between gripper and object, 
+    it's basically from a past frame deltas next-step or current frame gap-to-grasp.
+
 
 ACTION STYLE GUIDE:
 
@@ -217,6 +220,8 @@ THINK STYLE GUIDANCE:
         - obstacle / orientation choice: You notice these's risk to collide with something if you approach from one direction, or you need to orient the gripper in a certain way to clear the obstacle.
 
         DO NOT fill [think] for regular case, it's obvious to do "lower 5 cm to reach the block" when you are 5 cm above the block, no need to say "the gripper is 5 cm above the block so lower 5 cm to reach it". But if there's an obstacle near the block and you need to approach from a certain direction, then you should fill [think] with "approach from the left to clear the adjacent bowl".
+
+        Copy [PLAN] to the first [think] if there's no more supplement
 
 
 ADDITIONAL GUIDANCE:

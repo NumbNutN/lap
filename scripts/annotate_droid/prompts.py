@@ -130,19 +130,23 @@ STAGE STYLE GUIDE:
 
     Reference:
     FAR from target (approach/transport phase):
-        ✓ "Gripper in the upper-right of the frame, descending toward the bottle cluster on the counter." (action expert may know what to do next based on this state description)
+        Describe the stage with rough direction if there's no precise spatial relationship because:
+         - not a contact-rich keyframe (grasp/release/pre/post interaction), OR
+         - not aligned with the target yet
+
+        precise pose from gap-to-grasp or next-step are only recomanded when the gripper need to make a precise adjustment during the next action. Otherwise just give a rough direction.
+
+        ✓ "Gripper in the upper-right of the frame, the bottle cluster is located to the left front" (action expert may know what to do next based on this state description)
         ✓ "Gripper moved across the sink, about 5cm to the left front of the brush"
-        ✗ "+2.1 cm right, +1.6 cm back, +7.7 cm up with 13°
-               compound" (raw delta dump — You are just not describing the state here)
+        ✗ "+2.1 cm right, +1.6 cm back, +7.7 cm up with 13° yaw" (raw delta dump — You are not describing the state here)
 
     NEAR target (contact-rich fine-tune):
         ✓ "The gripper needs 39° more pitch to be perpendicular to the counter."
         ✓ "The gripper hovers 2 cm above the candy bar, ready to close." (gap-to-target is good here, informatively describes the state, and also help the action expert know what to do )
         ✗ "The gripper is almost aligned with the cube" (ambiguous - how close? Too rough for fine-tuning phase, not informative for action expert to know what to do next)
 
-            R12a. ZERO FILLER. These phrases are BANNED because they carry no
-        positional information:
-        ✗ "Survey scene and begin approach"
+    NOT ZERO FILLER. These phrases are considered to carry no
+        positional information if they are the only content describing the stage:
         ✗ "Position fingers around object"
         ✗ "Prepare to re-engage object"
         ✗ "Begin grasp closure"
@@ -157,7 +161,7 @@ ACTION STYLE GUIDE:
 
     transport / retract motion keyframes
 
-    There's two style reference
+    There're two style reference
 
     1. The movement has a clear relative goal
     It's welcome to use the Δnext-step to describe action, use axis-aware vocabulary with numbers.
@@ -257,8 +261,8 @@ HARD RULES:
 
     R5. Δ semantics — see "You receive" section above.
         Pre-interaction keyframes get TWO deltas:
-          - gap-to-interaction → for stage (state description)
-          - next-step → for action (demo motion to imitate)
+            - gap-to-interaction → for stage (state description)
+            - next-step → for action (demo motion to imitate)
         Other keyframes get one forward-step delta → for action direction.
 
 

@@ -138,8 +138,13 @@ STAGE STYLE GUIDE:
     and image:
 
     FAR from target (gap is large, approach/transport phase):
-        Use gap as CONTEXT, not raw numbers. Describe the gripper's
-        position via scene landmarks and the rough remaining distance.
+
+    Describe the stage via scene landmarks, rough direction and the the rough remaining distance if there's no precise spatial relationship because:
+         - not a contact-rich keyframe (grasp/release/pre/post interaction), OR
+         - not aligned with the target yet
+    
+    precise pose from gap-to-grasp or next-step are only recomanded when the gripper need to make a precise adjustment during the next action. Otherwise just give a rough direction.
+
         ✓ "Gripper in the upper-right of the frame, approaching the bottle cluster on the left front, still well above the table"
         ✓ "Carrying the marker about halfway from grasp pose to the pot"
         ✓ "Gripper moved across the sink, still ~10 cm above and to the right of the brush"
@@ -149,7 +154,7 @@ STAGE STYLE GUIDE:
     NEAR target (gap is small, contact-rich fine-tune):
         Precise gap numbers ARE informative — use them.
         ✓ "The gripper needs 39° more pitch to be perpendicular to the counter."
-        ✓ "Hovering 2 cm above the candy bar, ready to close."
+        ✓ "The gripper is hovering 2 cm above the candy bar, ready to close."
         ✓ "3 cm above and 2° pitch from grasp pose on the bottle neck."
         ✗ "Almost aligned with the cube" (ambiguous - how close?)
 
@@ -159,10 +164,7 @@ STAGE STYLE GUIDE:
         ✗ "Begin grasp closure"
         Replace with WHAT specifically: direction, distance, object part.
 
-    TIP: USE THE PROVIDED gap-to-* DIRECTLY for gripper-to-target distance.
-    Do NOT try to accumulate next-step deltas across frames to estimate
-    the distance — the gap line already tells you. Causality is still
-    needed for: whether an object is currently held (past grasp event),
+    CAUSALITY is needed for: whether an object is currently held (past grasp event),
     which pick-place cycle we're in, whether a past attempt failed.
 
 

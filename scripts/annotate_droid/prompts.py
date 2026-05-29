@@ -49,19 +49,21 @@ You receive:
        keyframe is near a grasp/release event.
      - **Pose deltas** — one or two lines depending on context:
 
-       For keyframes tagged `pre_grasp` or `pre_release`, you get TWO:
-         gap-to-grasp: Δxyz=(...) Δrot=...   ← distance from HERE to
-             the grasp/release EE pose. Use this in **stage** to
-             describe how far the gripper is from the target config.
-         next-step:    Δxyz=(...) Δrot=...   ← what the human demo
-             does in the next segment. Use this in **action** to
-             describe what motion to execute (this IS the demonstration).
+       Every keyframe has a forward `next-step` delta (motion from this
+       keyframe to the next keyframe). Use this in **action** to
+       describe what motion to execute — it IS the human demonstration.
 
-       For all other keyframes (transport, retract, begin, end):
-         A single forward-step delta (motion to the next keyframe).
-         This is a sample of continuous motion, not a commanded
-         waypoint — use it to identify the dominant direction and
-         approximate magnitude, not to copy exact numbers.
+       When the gripper is on a clear approach toward an upcoming
+       grasp/release event (and not in the 2-frame transition window
+       right after one), an additional gap line is provided:
+         gap-to-grasp:   Δxyz=... Δrot=...   ← from HERE to upcoming grasp pose
+         gap-to-release: Δxyz=... Δrot=...   ← from HERE to upcoming release pose
+       Use this in **stage** to describe the gripper's distance to its
+       current control target.
+
+       Transition window (grasp/release frame + 2 frames after) shows
+       only next-step — the gripper is settling, not aiming at a target.
+       Post-final-release frames also have only next-step.
 
        Rotation format: single-axis rotations show e.g. "11° pitch".
        Multi-axis rotations are decomposed, e.g. "≈8° pitch+5° yaw"
@@ -129,31 +131,39 @@ STAGE STYLE GUIDE:
     A good stage is specific enough that a reader could identify WHICH keyframe it belongs to without seeing the frame index. 
 
     Reference:
-    FAR from target (approach/transport phase):
-        Describe the stage with rough direction if there's no precise spatial relationship because:
-         - not a contact-rich keyframe (grasp/release/pre/post interaction), OR
-         - not aligned with the target yet
+    gap-to-* is provided for most approach/transport keyframes. It tells
+    you how far the gripper still has to go to reach the upcoming
+    interaction pose. Use it judiciously — it's qualitative when far,
+    precise when near. Trust your judgment based on the gap magnitude
+    and image:
 
-        precise pose from gap-to-grasp or next-step are only recomanded when the gripper need to make a precise adjustment during the next action. Otherwise just give a rough direction.
+    FAR from target (gap is large, approach/transport phase):
+        Use gap as CONTEXT, not raw numbers. Describe the gripper's
+        position via scene landmarks and the rough remaining distance.
+        ✓ "Gripper in the upper-right of the frame, approaching the bottle cluster on the left front, still well above the table"
+        ✓ "Carrying the marker about halfway from grasp pose to the pot"
+        ✓ "Gripper moved across the sink, still ~10 cm above and to the right of the brush"
+        ✗ "+2.1 cm right, +1.6 cm back, +7.7 cm up with 13° yaw" (raw delta dump)
+        ✗ "Gripper 22.3 cm above and 15.7 cm forward from grasp pose" (gap dump)
 
-        ✓ "Gripper in the upper-right of the frame, the bottle cluster is located to the left front" (action expert may know what to do next based on this state description)
-        ✓ "Gripper moved across the sink, about 5cm to the left front of the brush"
-        ✗ "+2.1 cm right, +1.6 cm back, +7.7 cm up with 13° yaw" (raw delta dump — You are not describing the state here)
-
-    NEAR target (contact-rich fine-tune):
+    NEAR target (gap is small, contact-rich fine-tune):
+        Precise gap numbers ARE informative — use them.
         ✓ "The gripper needs 39° more pitch to be perpendicular to the counter."
-        ✓ "The gripper hovers 2 cm above the candy bar, ready to close." (gap-to-target is good here, informatively describes the state, and also help the action expert know what to do )
-        ✗ "The gripper is almost aligned with the cube" (ambiguous - how close? Too rough for fine-tuning phase, not informative for action expert to know what to do next)
+        ✓ "Hovering 2 cm above the candy bar, ready to close."
+        ✓ "3 cm above and 2° pitch from grasp pose on the bottle neck."
+        ✗ "Almost aligned with the cube" (ambiguous - how close?)
 
-    NOT ZERO FILLER. These phrases are considered to carry no
-        positional information if they are the only content describing the stage:
+    NOT ZERO FILLER. These phrases carry no positional information:
         ✗ "Position fingers around object"
         ✗ "Prepare to re-engage object"
         ✗ "Begin grasp closure"
         Replace with WHAT specifically: direction, distance, object part.
 
-    TIP: NOTE CAUSALITY.Pose deltas next-step is a to go action. If you can infer the relative position between gripper and object, 
-    it's basically from a past frame deltas next-step or current frame gap-to-grasp.
+    TIP: USE THE PROVIDED gap-to-* DIRECTLY for gripper-to-target distance.
+    Do NOT try to accumulate next-step deltas across frames to estimate
+    the distance — the gap line already tells you. Causality is still
+    needed for: whether an object is currently held (past grasp event),
+    which pick-place cycle we're in, whether a past attempt failed.
 
 
 ACTION STYLE GUIDE:
@@ -470,46 +480,47 @@ FEWSHOT_USER = {
 FEWSHOT_V3_USER = {
     "task_instruction": "Put the marker in the pot",
     "keyframes_meta": [
-        # begin — single forward-step delta
+        # begin — FAR from grasp, gap-to-grasp + next-step
         {"frame_idx": 0,   "type": "begin",   "gripper_state": "open",
-         "pose_delta_str": "Δxyz=(+1.3cm,+1.8cm,-3.6cm)  Δrot≈2° pitch"},
-        # transport approach — single forward-step
+         "pose_delta_str": "gap-to-grasp: Δxyz=(+23.3cm,+6.6cm,-40.3cm)  Δrot≈19° pitch+7° roll\n    next-step: Δxyz=(+1.3cm,+1.8cm,-3.6cm)  Δrot≈2° pitch"},
+        # FAR transport approach
         {"frame_idx": 11,  "type": "motion",  "gripper_state": "open",
-         "pose_delta_str": "Δxyz=(+15.3cm,+5.2cm,-20.7cm)  Δrot≈9° pitch+5° yaw"},
-        # pre_grasp — DUAL delta: gap-to-grasp + next-step
+         "pose_delta_str": "gap-to-grasp: Δxyz=(+22.0cm,+4.8cm,-36.7cm)  Δrot≈17° pitch+6° roll\n    next-step: Δxyz=(+15.3cm,+5.2cm,-20.7cm)  Δrot≈9° pitch+5° yaw"},
+        # pre_grasp — NEAR
         {"frame_idx": 27,  "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "pre_grasp",
          "pose_delta_str": "gap-to-grasp: Δxyz=(+6.7cm,-0.4cm,-16.0cm)  Δrot=14° pitch\n    next-step: Δxyz=(+3.9cm,-0.5cm,-5.3cm)  Δrot≈3° pitch+1° yaw"},
         {"frame_idx": 35,  "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "pre_grasp",
          "pose_delta_str": "gap-to-grasp: Δxyz=(+2.8cm,+0.1cm,-10.7cm)  Δrot=11° pitch\n    next-step: Δxyz=(+2.8cm,+0.1cm,-10.7cm)  Δrot=11° pitch"},
-        # grasp — single delta
+        # grasp — transition window starts. No gap (gripper IS the interaction).
         {"frame_idx": 59,  "type": "grasp",   "gripper_state": "open",
          "near_interaction": True,
          "pose_delta_str": "Δxyz=(+0.5cm,+1.0cm,-0.1cm)  Δrot≈0°"},
-        # post_grasp — single forward-step
+        # post_grasp +1 — in transition window, no gap yet
         {"frame_idx": 67,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "post_grasp",
          "pose_delta_str": "Δxyz=(+0.6cm,-0.2cm,+0.7cm)  Δrot=1° -yaw"},
-        # transport — single forward-step
+        # post_grasp +2 — last frame of transition window, no gap yet
         {"frame_idx": 75,  "type": "motion",  "gripper_state": "closed",
          "pose_delta_str": "Δxyz=(-0.5cm,-1.4cm,+11.2cm)  Δrot=12° -yaw"},
-        # pre_release — DUAL delta
+        # out of transition window → gap-to-release resumes (FAR phase)
         {"frame_idx": 87,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "pre_release",
          "pose_delta_str": "gap-to-release: Δxyz=(-11.6cm,-9.9cm,-5.1cm)  Δrot≈12° yaw+6° roll\n    next-step: Δxyz=(-5.0cm,-5.9cm,-0.6cm)  Δrot≈8° yaw+4° roll"},
+        # pre_release NEAR
         {"frame_idx": 97,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "pre_release",
          "pose_delta_str": "gap-to-release: Δxyz=(-6.6cm,-4.0cm,-4.5cm)  Δrot≈7° roll+3° yaw\n    next-step: Δxyz=(-6.6cm,-4.0cm,-4.5cm)  Δrot≈7° roll+3° yaw"},
-        # release — single delta
+        # release — transition window starts, no gap
         {"frame_idx": 134, "type": "release", "gripper_state": "closed",
          "near_interaction": True,
          "pose_delta_str": "Δxyz=(-0.0cm,+0.2cm,-0.1cm)  Δrot≈0°"},
-        # post_release — single forward-step
+        # post_release +1 — in window, no gap (and no future interaction either)
         {"frame_idx": 145, "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "post_release",
          "pose_delta_str": "Δxyz=(-2.6cm,+3.2cm,+5.3cm)  Δrot≈3° pitch+2° yaw"},
-        # end — no delta
+        # end — last frame
         {"frame_idx": 165, "type": "end",     "gripper_state": "open",
          "pose_delta_str": ""},
     ],
@@ -528,16 +539,19 @@ FEWSHOT_V3_ASSISTANT = {
         {
             "frame_idx": 0,
             "mode_marker": "[think_act]",
-            "stage": "Gripper at home pose, rear-left of scene, well above the wooden table. Pot sits center-right; marker is a thin dark cylinder lying flat on the table near the pot.",
-            "think": None,
-            "action": "Head toward the table center, descending toward the marker.",
+            # FAR: gap-to-grasp is large (~40 cm), use as context not numbers
+            "stage": "Gripper at home pose, rear-left of scene, well above the wooden table. Pot sits center-right; marker is a thin dark cylinder lying flat near the pot. Still well above and behind the grasp pose.",
+            # First [think]: restate plan briefly (per think style guide)
+            "think": "Plan: approach the marker from above, pitch jaws near-vertical to align with its long axis, grasp the barrel, then carry to the pot for release.",
+            "action": "Head toward the table center, descending slightly.",
         },
         {
             "frame_idx": 11,
             "mode_marker": "[think_act]",
-            "stage": "Gripper entering the frame from upper-left, about 20 cm above the table, sweeping forward-right toward the marker region.",
+            # FAR: still ~37 cm from grasp, qualitative context
+            "stage": "Gripper has descended sharply, now about 20 cm above the table and still roughly half a workspace from the grasp pose. Marker visible below ahead.",
             "think": None,
-            "action": "Continue steep descent toward the table surface near the marker.",
+            "action": "Continue forward 15 cm and lower 21 cm toward the marker region.",
         },
         {
             "frame_idx": 27,
@@ -737,9 +751,9 @@ def build_user_text(
             if kf.get("near_interaction"):
                 ctx = kf.get("interaction_context", "")
                 if ctx:
-                    bits.append(f"**TIER_B:{ctx}**")
+                    bits.append(f"**{ctx}**")
                 else:
-                    bits.append("**TIER_B**")
+                    bits.append("**near-interaction**")
             if kf.get("pose_delta_str"):
                 bits.append(kf["pose_delta_str"])
         if feed_types and kf.get("previous_attempt_frame") is not None:

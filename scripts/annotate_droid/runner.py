@@ -71,62 +71,22 @@ def annotate_episode(
     if not keyframes:
         return _failure(bundle, "no keyframes detected", "")
 
-    # 2. Compute per-keyframe FORWARD pose deltas (this keyframe → next
-    #    keyframe) — only when we have full 6-DoF pose data AND the user
-    #    opted into memory mode. Forward direction is intentional: the
-    #    `action` field describes the motion the robot is ABOUT TO
-    #    execute, so the delta we surface in the prompt should describe
-    #    the same upcoming segment. Last keyframe has Δ=zero (nothing
-    #    after it).
-    pose_deltas_str: list[str] = ["" for _ in keyframes]
-    if memory_augmented and bundle.ee_pose is not None:
-        from .pose_utils import pose_delta
-
-        # For TIER_B pre_grasp / pre_release keyframes, compute gap to the
-        # ACTUAL interaction pose (the grasp/release keyframe's EE pose),
-        # not just the next keyframe. This is the real control target —
-        # "how much further until the gripper reaches its grasp configuration"
-        # — vs the old forward-delta which was just a sampling step.
-        # For all other keyframes, keep forward-delta to next keyframe.
-        for i, kf in enumerate(keyframes):
-            cur_pose = bundle.ee_pose[kf.t]
-            ctx = interaction_context[i]
-
-            # Forward delta to next keyframe (always computed)
-            if i + 1 < len(keyframes):
-                next_pose = bundle.ee_pose[keyframes[i + 1].t]
-            else:
-                next_pose = cur_pose
-            fwd = pose_delta(next_pose, cur_pose)
-
-            if ctx and ctx.startswith("pre_"):
-                # Pre-interaction: provide BOTH deltas.
-                # - gap-to-interaction: for stage (distance to target config)
-                # - next-step: for action (what the demo actually does next)
-                target_type = ctx.split("_", 1)[1]
-                target_pose = None
-                for j in range(i + 1, len(keyframes)):
-                    if keyframes[j].type == target_type:
-                        target_pose = bundle.ee_pose[keyframes[j].t]
-                        break
-                if target_pose is not None:
-                    gap = pose_delta(target_pose, cur_pose)
-                    pose_deltas_str[i] = (
-                        f"gap-to-{target_type}: {gap}\n"
-                        f"    next-step: {fwd}"
-                    )
-                    continue
-
-            pose_deltas_str[i] = str(fwd)
-
-    # 2b. Tag near-interaction keyframes (within ±2 of grasp/release/retry).
-    # The prompt tells the VLM: near_interaction=true → TIER B (fine-tune
-    # precision with numbers); false → TIER C (qualitative).
+    # 2. Tag near-interaction keyframes and compute pose deltas.
+    # Order matters: interaction_context must exist BEFORE pose delta loop.
     _INTERACTION_TYPES = {"grasp", "release", "retry"}
     _NEAR_RADIUS = 2
+    # Window AFTER an interaction (grasp/release frame itself + N frames)
+    # during which we DON'T provide gap-to-next. The gripper is settling /
+    # closing / opening — gap to a distant future interaction would be
+    # misleading. user-tuned: 2 → grasp + 2 frames = 3 frames of transition.
+    _TRANSITION_WINDOW = 2
+
+    interaction_positions = [
+        i for i, kf in enumerate(keyframes) if kf.type in _INTERACTION_TYPES
+    ]
+
     near_interaction = [False] * len(keyframes)
-    # Finer sub-tag: "pre_release" / "pre_grasp" / "post_release" / "post_grasp"
-    # so the prompt can give release-approach-specific examples.
+    # Sub-tag: "pre_release" / "pre_grasp" / "post_release" / "post_grasp"
     interaction_context: list[str | None] = [None] * len(keyframes)
     if memory_augmented:
         for i, kf in enumerate(keyframes):
@@ -134,11 +94,9 @@ def annotate_episode(
                 for j in range(max(0, i - _NEAR_RADIUS),
                                min(len(keyframes), i + _NEAR_RADIUS + 1)):
                     near_interaction[j] = True
-        # Sub-tag: for each TIER_B keyframe, classify WHY it's near interaction.
         for i, kf in enumerate(keyframes):
             if not near_interaction[i] or kf.type in _INTERACTION_TYPES:
-                continue  # only tag the motion frames around interactions
-            # Look for the nearest interaction keyframe.
+                continue
             nearest_inter = None
             nearest_dist = float("inf")
             for j, kf2 in enumerate(keyframes):
@@ -147,10 +105,51 @@ def annotate_episode(
                     nearest_inter = (j, kf2.type)
             if nearest_inter is not None:
                 j, itype = nearest_inter
-                if i < j:
-                    interaction_context[i] = f"pre_{itype}"
-                else:
-                    interaction_context[i] = f"post_{itype}"
+                interaction_context[i] = f"pre_{itype}" if i < j else f"post_{itype}"
+
+    def _gap_target_for(i: int) -> int | None:
+        """Return the keyframe index of the next interaction to gap toward,
+        or None if (a) we're in the transition window of a past interaction
+        or (b) there's no upcoming interaction."""
+        # In transition window of any past interaction (including the
+        # interaction frame itself + TRANSITION_WINDOW frames after)?
+        for past_idx in interaction_positions:
+            if past_idx <= i and (i - past_idx) <= _TRANSITION_WINDOW:
+                return None
+        # Find the next interaction strictly after i.
+        for future_idx in interaction_positions:
+            if future_idx > i:
+                return future_idx
+        return None  # no upcoming interaction (post-final-release)
+
+    # next-step = forward delta to next keyframe. Always computed.
+    # gap-to-{grasp,release} = delta from HERE to the upcoming interaction
+    # pose. Provided for all approach/transport frames OUTSIDE the
+    # 2-frame transition window after a recent grasp/release.
+    pose_deltas_str: list[str] = ["" for _ in keyframes]
+    if memory_augmented and bundle.ee_pose is not None:
+        from .pose_utils import pose_delta
+
+        for i, kf in enumerate(keyframes):
+            cur_pose = bundle.ee_pose[kf.t]
+
+            if i + 1 < len(keyframes):
+                next_pose = bundle.ee_pose[keyframes[i + 1].t]
+            else:
+                next_pose = cur_pose
+            fwd = pose_delta(next_pose, cur_pose)
+
+            target_idx = _gap_target_for(i)
+            if target_idx is not None:
+                target_kf = keyframes[target_idx]
+                target_pose = bundle.ee_pose[target_kf.t]
+                gap = pose_delta(target_pose, cur_pose)
+                pose_deltas_str[i] = (
+                    f"gap-to-{target_kf.type}: {gap}\n"
+                    f"    next-step: {fwd}"
+                )
+            else:
+                pose_deltas_str[i] = str(fwd)
 
     # 3. Build VLM-ready metadata + lazy-load images for selected frames
     keyframes_meta = []

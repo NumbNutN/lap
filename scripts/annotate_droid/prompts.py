@@ -133,9 +133,7 @@ STAGE STYLE GUIDE:
     Reference:
     gap-to-* is provided for most approach/transport keyframes. It tells
     you how far the gripper still has to go to reach the upcoming
-    interaction pose. Use it judiciously — it's qualitative when far,
-    precise when near. Trust your judgment based on the gap magnitude
-    and image:
+    interaction pose. 
 
     FAR from target (gap is large, approach/transport phase):
 
@@ -274,14 +272,6 @@ HARD RULES:
       (done plan progress / past event / counter / cross-step causality).
 
   R4. Reference length: Plan ≤ 5 sentences. Stage ≤ 40 words. Action ≤ 20 words.
-
-
-    R5. Δ semantics — see "You receive" section above.
-        Pre-interaction keyframes get TWO deltas:
-            - gap-to-interaction → for stage (state description)
-            - next-step → for action (demo motion to imitate)
-        Other keyframes get one forward-step delta → for action direction.
-
 
 """
 

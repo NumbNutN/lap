@@ -130,10 +130,12 @@ STAGE STYLE GUIDE:
 
     A good stage is specific enough that a reader could identify WHICH keyframe it belongs to without seeing the frame index. 
 
-    Reference:
+    
     gap-to-* is provided for most approach/transport keyframes. It tells
     you how far the gripper still has to go to reach the upcoming
-    interaction pose. 
+    interaction pose.  
+    Notice: Answer just like you do not know the gap-to-interaction: gap-to-interaction is not obvious if you do not know it.
+    Use it as an auxiliary signal, try to describe the stage based on what you see in external camera and wrist camera. here's intuitive reference:
 
     FAR from target (gap is large, approach/transport phase):
 
@@ -143,15 +145,15 @@ STAGE STYLE GUIDE:
     
     precise pose from gap-to-grasp or next-step are only recomanded when the gripper need to make a precise adjustment during the next action. Otherwise just give a rough direction.
 
-        ✓ "Gripper in the upper-right of the frame, approaching the bottle cluster on the left front, still well above the table"
-        ✓ "Carrying the marker about halfway from grasp pose to the pot"
-        ✓ "Gripper moved across the sink, still ~10 cm above and to the right of the brush"
+        ✓ "Gripper in the upper-right of the frame, approaching the bottle cluster on the left front, still well above the table"  (approach phase)
+        ✓ "Gripper moved across the sink, still ~10 cm above and to the right of the brush" (transport phase)
+        ✓ "Gripper holding the marker ~11 cm above table." (post-grasp, no gap-to-release yet)
         ✗ "+2.1 cm right, +1.6 cm back, +7.7 cm up with 13° yaw" (raw delta dump)
         ✗ "Gripper 22.3 cm above and 15.7 cm forward from grasp pose" (gap dump)
 
     NEAR target (gap is small, contact-rich fine-tune):
         Precise gap numbers ARE informative — use them.
-        ✓ "The gripper needs 39° more pitch to be perpendicular to the counter."
+        ✓ "The gripper needs 39° more pitch to be perpendicular to the counter." (scene landmark + orientation gap)
         ✓ "The gripper is hovering 2 cm above the candy bar, ready to close."
         ✓ "3 cm above and 2° pitch from grasp pose on the bottle neck."
         ✗ "Almost aligned with the cube" (ambiguous - how close?)
@@ -178,9 +180,12 @@ ACTION STYLE GUIDE:
 
     1. The movement has a clear relative goal
     It's welcome to use the Δnext-step to describe action, use axis-aware vocabulary with numbers.
-    ✓ "leftward 5.6cm, forward 3.6cm and lower 2.1cm, yawing counterclockwise 13° to align the handle of the mug with the gripper jaws"
+    ✓ "leftward ~5 cm, forward ~4 cm and lower 2 cm, yawing counterclockwise 13° to align the handle of the mug with the gripper jaws"
 
-    2. The gripper is moving FREELY between scene regions - precise pose is not critical, the keyframe is just a sample of continuous motion, you just describe the trend direction, like "move forward and upward with yaw clockwise to approach the bottle cluster"
+    2. The gripper is moving FREELY between scene regions, precise pose is not critical, some cases include:
+     - the keyframe is just a sample of continuous motion
+     - No carefully align or interaction pose is expected at the next keyframe
+     you just describe the trend direction, like "move forward and upward with yaw clockwise to approach the bottle cluster"
     ✓ "Lift the candy bar up to the shelf level"
     ✓ "Head towards 9 o'clock in camera view"
     
@@ -199,13 +204,6 @@ ACTION STYLE GUIDE:
           to match the target (e.g. rotating to be perpendicular)
         - any keyframe where a small position correction brings the
           gripper closer to a precise interaction point
-    
-      For pre_grasp / pre_release keyframes, two deltas are provided:
-        - gap-to-interaction: use in stage to describe distance to target
-        - next-step: use in action to describe the demo's next motion
-
-      Use AXIS-AWARE vocabulary with numbers from next-step. These
-      numbers describe the actual human demonstration motion.
 
       **Pre-grasp** (tag `pre_grasp`):
           ✓ "Right 1.7 cm, pitch forward 2° to align jaws with bottle neck"
@@ -215,7 +213,7 @@ ACTION STYLE GUIDE:
 
       **Pre-release** (tag `pre_release`):
           ✓ "Lower 5 cm to seat the marker just above the pot opening"
-          ✓ "Forward 2 cm to center above the bowl rim before releasing"
+          ✓ "Forward 2.2 cm to center above the bowl rim before releasing"
           ✗ "Prepare to release the object" (filler)
 
       **Post-grasp / post-release** (`post_grasp` / `post_release`):

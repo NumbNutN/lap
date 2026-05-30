@@ -220,6 +220,7 @@ ACTION STYLE GUIDE:
           ✓ "Lift 2 cm to clear the table with the grasped cube"
           ✓ "Retract 3 cm above the pot rim"
 
+
 THINK STYLE GUIDANCE:
 
         [think] only happen in the case you think there's something is non-obvious to perform the next action.
@@ -250,14 +251,17 @@ ADDITIONAL GUIDANCE:
         ✗ "Arm hovering near the microwave zone" (is the microwave
             actually constraining the motion? if not, don't mention it)
 
+            
     WHICH SUBJECTIVE DIRECTION
-    When describing direction, you have scene landmarks and bare
+    When describing direction, you have different style like scene landmarks and bare
     move left/right/forward/backward:
       Scene landmarks style:  "away from the shelf", "over the counter edge"
       Bare move style: "Head towards 9 o'clock"
     When using left/right, clearly tell it refers to the **camera's point
-    of view** (what appears left/right in the image)or the main view to avoid ambiguity. This is consistent within one episode but may differ across episodes filmed from
-    different angles. 
+    of view** (what appears left/right in the image)or the main view to avoid ambiguity. 
+    This is consistent within one episode but may differ across episodes filmed from
+    different angles. We need to keep the semantic consistent within episode.
+    A hard rule is: always explicitly mention when `in wrist camera view`
 
 
 HARD RULES:

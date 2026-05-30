@@ -19,13 +19,53 @@ Last updated: 2026-05-30
 - **NOT YET** changing the input format. Holding off on labelling Δxyz
   as `(forward=, left=, up=)` until we test v4.3.3 first.
 
-### Q2. Keyframe density (tight cluster problem)
-- 8% of keyframe gaps are <0.5s (cross-episode). ep34 alone has 7 tight
-  clusters.
-- Suspected primary cause: R3 retry (close→open→close in <1.5s) produces
-  2-3 frame keyframe spacing **by design** (this is the semantics).
-- Need to confirm with data: enumerate all <0.5s gaps across 50 eps and
-  classify by (type_i, type_j) and which rule fired.
+### Q2. Keyframe density (tight cluster analysis)
+
+Cross-50-episode keyframe gap distribution (2026-05-30 analysis):
+
+```
+1011 gaps total. mean=0.94s  median=0.73s  std=0.69s  min=0.07s  max=3.93s
+
+[0.0, 0.2):    47 ███
+[0.2, 0.5):    91 ██████             ← tight clusters (138 = 13% of all)
+[0.5, 1.0):   582 ████████████████████████████████████████  ← bulk
+[1.0, 1.5):   137 █████████
+[1.5, 2.0):    49 ███
+[2.0, 3.0):    77 █████
+[3.0, 5.0):    28 █
+```
+
+**Tight gaps by (type_i → type_j)** — the key finding:
+
+| Pair                      | Tight / Total | % | Interpretation                  |
+|---------------------------|---------------|----|----------------------------------|
+| `release` → `motion`      | 37 / 60       | 61% | post_release transition         |
+| `motion`  → `grasp`       | 29 / 58       | 50% | pre_grasp last frame            |
+| `grasp`   → `motion`      | 28 / 57       | 49% | post_grasp transition           |
+| `motion`  → `release`     | 27 / 56       | 48% | pre_release last frame          |
+| `motion`  → `motion`      | 16 / 623      | 2.6% | basically clean                 |
+| `grasp`   → `grasp`       | 1 / 1         | 100% | retry pattern                   |
+
+**~88% of tight clusters are around grasp/release events** — they're
+**semantically real**, not detector bugs. They mark the brief settling
+window after gripper state change.
+
+Per-episode tight count: 39/50 episodes have ≥1 tight gap.
+Most concentrated:
+  ep35 (15) — tissue cleanup, 6 grasp-release cycles
+  ep43 (12) — laundry fold, multi-object
+  ep34 (10) — two-cloth pick-place
+  ep38 (10) — orange objects, 3 cycles
+
+The 1-frame gaps (0.07s, e.g. `release → motion` at adjacent frames)
+are anchor-point artifacts: rule-based detector picks both the
+release-state-stabilized moment AND a motion-change moment one frame
+later. Could be merged but losing them costs no semantics.
+
+→ **Decision**: don't aggressively merge. Keep them for annotation-side
+VQA supervision (more data points). Deploy-side execution chunk
+naturally smooths them out (the 16-step open-loop chunk doesn't care
+about 1-frame anchors).
 
 ### Q3. Agent-feedback loop for keyframe selection (proposed)
 - Concept: give the VLM `add(t, type)`, `remove(t)`, `view(t)` interfaces
@@ -64,13 +104,38 @@ reference for the time we revisit this.
 
 ### Sprint 1 — Verify convention fix (action ↔ delta)
 - [x] v4.3.3 prompt update: require declaration when using camera view
-- [ ] Re-run ep0/32/34 with v4.3.3 prompt
-- [ ] Improve action↔delta checker:
-  - [ ] Detect "from camera view" / "in camera frame" declarations
-  - [ ] Under declared camera view, flip x/y signs before comparison
-  - [ ] Report per-axis sign-flip rate + magnitude agreement
-- [ ] Decision point: if v4.3.3 still under 50% on dx/dy → revisit
-      labelling the input format `(forward=, left=, up=)`
+- [x] Re-run ep0/32/34 with v4.3.3 prompt
+- [x] Improve action↔delta checker (compound axis words like
+      `camera-left`, both word-before-number and number-before-word)
+- [x] Verification results (2026-05-30):
+
+  | ep | metric | v4.3.2 | v4.3.3 | Δ |
+  |----|--------|--------|--------|---|
+  | ep0 | dx sign  | 33% | 50%  | +17pp |
+  | ep0 | dy sign  | 20% | 14%  | -6pp  |
+  | ep32| dx sign  | 40% | 80%  | **+40pp** |
+  | ep32| dy sign  | 28% | 63%  | **+35pp** |
+  | ep34| dx sign  | 45% | 50%  | +5pp  |
+  | ep34| dy sign  | 29% | 33%  | +4pp  |
+  | all | dz sign  | 100%| 100% | flat  |
+
+  Declaration counts in v4.3.3: ep0 robot-base=11/camera-view=1, ep32
+  rb=19/cv=16, ep34 rb=49/cv=39. VLM often double-declares (e.g.
+  "camera-left (camera view, approximately robot base frame)").
+
+- [x] **Decision**: declaration alone is insufficient. Sign accuracy
+  remains 30–50% wrong on dx/dy. VLM cannot reliably distinguish
+  robot-base from camera-view without camera extrinsics. Next step:
+  change input pose-delta format to `Δrobot=(forward=+X, left=+Y,
+  up=+Z)` so VLM sees semantic axis labels directly.
+
+### Sprint 1.5 — Labelled-axis input format
+- [ ] Modify `pose_utils.PoseDelta.__str__` to emit
+      `Δrobot=(forward=+X.Xcm, left=+Y.Ycm, up=+Z.Zcm)` instead of
+      `Δxyz=(+X.X,+Y.Y,+Z.Z)`
+- [ ] Update prompt "You receive" §2 with new format example
+- [ ] Re-run ep0/32/34, expect sign accuracy >90% on all axes
+- [ ] If pass, run full 50-ep with new format; otherwise diagnose
 
 ### Sprint 2 — Keyframe rule audit
 - [ ] Enumerate all keyframe pairs with gap <0.5s across all 50 eps
@@ -158,6 +223,89 @@ Only do these if Sprint 2 identifies real artifacts (not just R3 retries):
 - Keyframe regeneration policy: regenerate when rule changes; do NOT
   re-use across rule versions (acceptance criterion: explicit version
   string in meta)
+
+## Pretraining at keyframes only — is the supervision too sparse?
+
+Question (raised 2026-05-30): pi05's pretraining recipe samples
+**every frame** as a training example (image + state + language →
+50-step action chunk). If LAP-cascade pretraining only happens at
+**keyframes** (avg 12 per episode), is that too sparse compared with
+~200-500 frames/episode?
+
+### Numbers
+
+| Source | Examples per episode | Total (50ep) | Total (76k ep DROID) |
+|--------|---------------------|--------------|----------------------|
+| pi05 frame-rate     | ~200-500    | ~15k    | ~25M  |
+| LAP keyframes-only  | ~12 (range 10-96) | ~1k | ~900k |
+| **Ratio** | ~25x sparser | 15x | ~28x |
+
+Roughly **25× fewer training examples** if we only condition on
+keyframes. Two distinct concerns:
+
+### Concern A: Coverage of observation distribution
+
+Per-frame pretraining sees the full continuous distribution of
+(state, image) — mid-approach poses, transient blurs, weird angles
+during transport, etc. Keyframe-only pretraining sees a curated subset:
+- begin / end / grasp / release frames
+- "interesting" motion changes
+- mid-stage fillers (R6) when long gaps
+
+So the model never sees the boring middle. For downstream control
+this matters because **deploy time visits the middle**. If the model
+hasn't trained on those states, behavior in the middle is uncertain.
+
+**However** — pi05 actually trains a **regression head** at frame
+rate (continuous action prediction). The TEXT supervision (which is
+what we're annotating with VQA `stage` + free-form `action`) sits
+on top of a vision backbone that's still trained on every frame's
+image-action pair.
+
+So the actual training recipe should be:
+1. **Frame-rate supervision** for the vision backbone + action regression
+   head — same as pi05 today, ~25M (image, action chunk) pairs
+2. **Keyframe-only supervision** for the LAP head (stage, action text)
+   — ~900k (image, stage, action_text) triples
+3. Both share the vision backbone
+
+This is the standard "multi-task with different label rates" pattern.
+RT-2 / OpenVLA / RT-X all do this.
+
+### Concern B: Mid-keyframe state never gets a stage/action label
+
+Even with the multi-task setup above, at deploy we never query LAP for
+mid-keyframe frames. So mid-keyframe LAP outputs are undefined. This
+is fine **IF**:
+- We only USE LAP outputs at keyframe boundaries (consistent with
+  training)
+- The downstream action regression head doesn't need LAP text input
+  (it conditions on state + image + language)
+
+It becomes a problem if downstream wants LAP text at every frame.
+For our single-pass receding-horizon (no bi-level), this isn't an
+issue — LAP text comes once per inference, paired with the obs.
+
+### Decision (for now)
+
+- **Train action regression at frame rate** (full pi05 recipe), no
+  change
+- **Train LAP text outputs at keyframe rate** (our annotation pipeline)
+- **Shared vision backbone** — keyframes are a subset of all frames,
+  the backbone sees both
+- **Don't try to densify keyframes** (would just add label noise)
+- **Don't try to back-fill LAP labels to mid-keyframe frames** (would
+  invent supervision we don't have)
+
+### Open question for later
+
+When we have more annotated episodes (say 1000+), is it worth a
+**dense LAP labeling pass** — e.g. ask the VLM to interpolate
+stage/action between two keyframe annotations? This would 25× the
+LAP training signal but at distillation quality, not human-equivalent.
+Defer until we see actual under-training symptoms.
+
+---
 
 ## Terminology — what we mean by "chunk"
 

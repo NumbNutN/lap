@@ -130,12 +130,33 @@ reference for the time we revisit this.
   up=+Z)` so VLM sees semantic axis labels directly.
 
 ### Sprint 1.5 — Labelled-axis input format
-- [ ] Modify `pose_utils.PoseDelta.__str__` to emit
+- [x] Modify `pose_utils.PoseDelta.__str__` to emit
       `Δrobot=(forward=+X.Xcm, left=+Y.Ycm, up=+Z.Zcm)` instead of
       `Δxyz=(+X.X,+Y.Y,+Z.Z)`
-- [ ] Update prompt "You receive" §2 with new format example
-- [ ] Re-run ep0/32/34, expect sign accuracy >90% on all axes
-- [ ] If pass, run full 50-ep with new format; otherwise diagnose
+- [x] Update prompt "You receive" §2 with new format example
+- [x] Update fewshot meta (17 occurrences auto-replaced)
+- [x] Re-run ep0/32/34 with v4.4
+
+**Result (2026-05-30): 100% sign + 100% magnitude on all axes.**
+
+  | ep   | dx mag/sign  | dy mag/sign | dz mag/sign |
+  |------|--------------|-------------|-------------|
+  | ep00 | 10/10 100%   | 1/1 100%    | 4/4 100%    |
+  | ep32 | 12/12 100%   | —           | 6/6 100%    |
+  | ep34 | 11/11 100%   | 1/1 100%    | 6/6 100%    |
+
+  Zero `Δrobot` syntax dumps in actions. Prose quality preserved.
+
+  Sign-accuracy across versions on dx/dy:
+
+  | Version | dx sign   | dy sign   |
+  |---------|-----------|-----------|
+  | v4.3.2  | 33-45%    | 20-29%    |
+  | v4.3.3  | 50-80%    | 14-63%    |
+  | v4.4    | **100%**  | **100%**  |
+
+- [ ] **Next**: run full 50-ep with v4.4 format, verify alignment holds
+      at scale
 
 ### Sprint 2 — Keyframe rule audit
 - [ ] Enumerate all keyframe pairs with gap <0.5s across all 50 eps

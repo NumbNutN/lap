@@ -70,8 +70,14 @@ class PoseDelta:
         return "Δrot≈" + ("+".join(out) if out else f"{self.angle_deg:.0f}° mixed")
 
     def __str__(self) -> str:
+        # Labelled axes in robot base frame: x=forward, y=left, z=up.
+        # The label makes the convention unambiguous to the VLM, so it
+        # cannot mistake the axis order or the sign meaning (a previous
+        # mismatch source — see iteration_plan §Sprint 1.5).
         return (
-            f"Δxyz=({self.dx_cm:+.1f}cm,{self.dy_cm:+.1f}cm,{self.dz_cm:+.1f}cm)  "
+            f"Δrobot=(forward={self.dx_cm:+.1f}cm, "
+            f"left={self.dy_cm:+.1f}cm, "
+            f"up={self.dz_cm:+.1f}cm)  "
             f"{self._rot_str()}"
         )
 

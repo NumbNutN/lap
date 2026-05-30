@@ -47,7 +47,17 @@ You receive:
      - **Interaction context tag** (when present): `pre_grasp`,
        `pre_release`, `post_grasp`, `post_release` — indicates this
        keyframe is near a grasp/release event.
-     - **Pose deltas** — one or two lines depending on context:
+     - **Pose deltas** — one or two lines depending on context.
+
+       Format: `Δrobot=(forward=+X.Xcm, left=+Y.Ycm, up=+Z.Zcm)` —
+       **always in the ROBOT BASE FRAME**, with axes explicitly
+       labelled. The signs mean exactly what they say:
+         - `forward=+5cm` means the EE moved 5 cm AWAY from the robot's
+           mount (forward in robot frame). If +5cm forward appears as
+           "moving right in the camera view" in the image, that's a
+           camera-frame artifact — the robot frame value is the truth.
+         - `left=+5cm` means EE moved 5 cm to the robot's LEFT.
+         - `up=+5cm` means EE rose 5 cm vertically.
 
        Every keyframe has a forward `next-step` delta (motion from this
        keyframe to the next keyframe). Use this in **action** to
@@ -56,8 +66,8 @@ You receive:
        When the gripper is on a clear approach toward an upcoming
        grasp/release event (and not in the 2-frame transition window
        right after one), an additional gap line is provided:
-         gap-to-grasp:   Δxyz=... Δrot=...   ← from HERE to upcoming grasp pose
-         gap-to-release: Δxyz=... Δrot=...   ← from HERE to upcoming release pose
+         gap-to-grasp:   Δrobot=(forward=..., left=..., up=...)  Δrot=...
+         gap-to-release: Δrobot=(forward=..., left=..., up=...)  Δrot=...
        Use this in **stage** to describe the gripper's distance to its
        current control target.
 
@@ -476,44 +486,44 @@ FEWSHOT_V3_USER = {
     "keyframes_meta": [
         # begin — FAR from grasp, gap-to-grasp + next-step
         {"frame_idx": 0,   "type": "begin",   "gripper_state": "open",
-         "pose_delta_str": "gap-to-grasp: Δxyz=(+23.3cm,+6.6cm,-40.3cm)  Δrot≈19° pitch+7° roll\n    next-step: Δxyz=(+1.3cm,+1.8cm,-3.6cm)  Δrot≈2° pitch"},
+         "pose_delta_str": "gap-to-grasp: Δrobot=(forward=+23.3cm, left=+6.6cm, up=-40.3cm)  Δrot≈19° pitch+7° roll\n    next-step: Δrobot=(forward=+1.3cm, left=+1.8cm, up=-3.6cm)  Δrot≈2° pitch"},
         # FAR transport approach
         {"frame_idx": 11,  "type": "motion",  "gripper_state": "open",
-         "pose_delta_str": "gap-to-grasp: Δxyz=(+22.0cm,+4.8cm,-36.7cm)  Δrot≈17° pitch+6° roll\n    next-step: Δxyz=(+15.3cm,+5.2cm,-20.7cm)  Δrot≈9° pitch+5° yaw"},
+         "pose_delta_str": "gap-to-grasp: Δrobot=(forward=+22.0cm, left=+4.8cm, up=-36.7cm)  Δrot≈17° pitch+6° roll\n    next-step: Δrobot=(forward=+15.3cm, left=+5.2cm, up=-20.7cm)  Δrot≈9° pitch+5° yaw"},
         # pre_grasp — NEAR
         {"frame_idx": 27,  "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "pre_grasp",
-         "pose_delta_str": "gap-to-grasp: Δxyz=(+6.7cm,-0.4cm,-16.0cm)  Δrot=14° pitch\n    next-step: Δxyz=(+3.9cm,-0.5cm,-5.3cm)  Δrot≈3° pitch+1° yaw"},
+         "pose_delta_str": "gap-to-grasp: Δrobot=(forward=+6.7cm, left=-0.4cm, up=-16.0cm)  Δrot=14° pitch\n    next-step: Δrobot=(forward=+3.9cm, left=-0.5cm, up=-5.3cm)  Δrot≈3° pitch+1° yaw"},
         {"frame_idx": 35,  "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "pre_grasp",
-         "pose_delta_str": "gap-to-grasp: Δxyz=(+2.8cm,+0.1cm,-10.7cm)  Δrot=11° pitch\n    next-step: Δxyz=(+2.8cm,+0.1cm,-10.7cm)  Δrot=11° pitch"},
+         "pose_delta_str": "gap-to-grasp: Δrobot=(forward=+2.8cm, left=+0.1cm, up=-10.7cm)  Δrot=11° pitch\n    next-step: Δrobot=(forward=+2.8cm, left=+0.1cm, up=-10.7cm)  Δrot=11° pitch"},
         # grasp — transition window starts. No gap (gripper IS the interaction).
         {"frame_idx": 59,  "type": "grasp",   "gripper_state": "open",
          "near_interaction": True,
-         "pose_delta_str": "Δxyz=(+0.5cm,+1.0cm,-0.1cm)  Δrot≈0°"},
+         "pose_delta_str": "Δrobot=(forward=+0.5cm, left=+1.0cm, up=-0.1cm)  Δrot≈0°"},
         # post_grasp +1 — in transition window, no gap yet
         {"frame_idx": 67,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "post_grasp",
-         "pose_delta_str": "Δxyz=(+0.6cm,-0.2cm,+0.7cm)  Δrot=1° -yaw"},
+         "pose_delta_str": "Δrobot=(forward=+0.6cm, left=-0.2cm, up=+0.7cm)  Δrot=1° -yaw"},
         # post_grasp +2 — last frame of transition window, no gap yet
         {"frame_idx": 75,  "type": "motion",  "gripper_state": "closed",
-         "pose_delta_str": "Δxyz=(-0.5cm,-1.4cm,+11.2cm)  Δrot=12° -yaw"},
+         "pose_delta_str": "Δrobot=(forward=-0.5cm, left=-1.4cm, up=+11.2cm)  Δrot=12° -yaw"},
         # out of transition window → gap-to-release resumes (FAR phase)
         {"frame_idx": 87,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "pre_release",
-         "pose_delta_str": "gap-to-release: Δxyz=(-11.6cm,-9.9cm,-5.1cm)  Δrot≈12° yaw+6° roll\n    next-step: Δxyz=(-5.0cm,-5.9cm,-0.6cm)  Δrot≈8° yaw+4° roll"},
+         "pose_delta_str": "gap-to-release: Δrobot=(forward=-11.6cm, left=-9.9cm, up=-5.1cm)  Δrot≈12° yaw+6° roll\n    next-step: Δrobot=(forward=-5.0cm, left=-5.9cm, up=-0.6cm)  Δrot≈8° yaw+4° roll"},
         # pre_release NEAR
         {"frame_idx": 97,  "type": "motion",  "gripper_state": "closed",
          "near_interaction": True, "interaction_context": "pre_release",
-         "pose_delta_str": "gap-to-release: Δxyz=(-6.6cm,-4.0cm,-4.5cm)  Δrot≈7° roll+3° yaw\n    next-step: Δxyz=(-6.6cm,-4.0cm,-4.5cm)  Δrot≈7° roll+3° yaw"},
+         "pose_delta_str": "gap-to-release: Δrobot=(forward=-6.6cm, left=-4.0cm, up=-4.5cm)  Δrot≈7° roll+3° yaw\n    next-step: Δrobot=(forward=-6.6cm, left=-4.0cm, up=-4.5cm)  Δrot≈7° roll+3° yaw"},
         # release — transition window starts, no gap
         {"frame_idx": 134, "type": "release", "gripper_state": "closed",
          "near_interaction": True,
-         "pose_delta_str": "Δxyz=(-0.0cm,+0.2cm,-0.1cm)  Δrot≈0°"},
+         "pose_delta_str": "Δrobot=(forward=-0.0cm, left=+0.2cm, up=-0.1cm)  Δrot≈0°"},
         # post_release +1 — in window, no gap (and no future interaction either)
         {"frame_idx": 145, "type": "motion",  "gripper_state": "open",
          "near_interaction": True, "interaction_context": "post_release",
-         "pose_delta_str": "Δxyz=(-2.6cm,+3.2cm,+5.3cm)  Δrot≈3° pitch+2° yaw"},
+         "pose_delta_str": "Δrobot=(forward=-2.6cm, left=+3.2cm, up=+5.3cm)  Δrot≈3° pitch+2° yaw"},
         # end — last frame
         {"frame_idx": 165, "type": "end",     "gripper_state": "open",
          "pose_delta_str": ""},

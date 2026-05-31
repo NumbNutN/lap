@@ -50,29 +50,27 @@ class PoseDelta:
     roll_deg: float = 0.0
     pitch_deg: float = 0.0
     yaw_deg: float = 0.0
-    # EE-local frame projection of the POSITION delta. Computed using
-    # the source pose's EE orientation (prev_pose's rotvec). Axes
-    # follow Franka EE convention (+z = approach direction / out of
-    # gripper jaws; +x, +y = perpendicular). For the wrist camera
-    # (rigidly mounted on the gripper flange), Δee_approach corresponds
-    # to "object getting closer in wrist view", and the perpendicular
-    # components map approximately to the wrist camera's in-plane axes
-    # up to a fixed mounting rotation.
-    dee_approach_cm: float | None = None  # along EE +z
-    dee_perp_x_cm: float | None = None    # along EE +x
-    dee_perp_y_cm: float | None = None    # along EE +y
-    # EE-local frame rotation decomposition. SAME physical rotation as
-    # roll/pitch/yaw_deg above, just expressed in the SOURCE EE's local
-    # frame instead of world. The total magnitude (angle_deg) is
-    # identical — only the per-axis decomposition differs by frame.
-    # Naming convention (matches Δrot_world for VLM consistency):
-    #   pitch_ee = around EE +y axis
-    #   yaw_ee   = around EE +z axis (approach axis — "twist")
-    #   roll_ee  = around EE +x axis
+    # EE-local frame ("visual EE frame", REP-103 / aircraft convention,
+    # rigidly attached to the gripper). Axes:
+    #   +x = forward — along camera optical axis (= EE approach direction)
+    #   +y = left    — camera left in wrist view
+    #   +z = up      — camera up in wrist view
+    # Mapping from Franka EE axes (z=approach, x/y=lateral) is:
+    #   forward = EE +z;  left = EE +x;  up = EE +y
+    # (default mount assumption — may differ by 90°/180° depending on
+    #  Zed-Mini bolt orientation; validate against wrist images).
+    dee_forward_cm: float | None = None  # along visual +x = EE +z (approach)
+    dee_left_cm: float | None = None     # along visual +y = EE +x
+    dee_up_cm: float | None = None       # along visual +z = EE +y
+    # EE-local frame rotation decomposition in the SAME visual frame.
+    # Aircraft RPY convention:
+    #   roll  = about visual +x (forward axis)  → "twist gripper around approach axis"
+    #   pitch = about visual +y (left axis)     → "nod up/down, object moves vertically in wrist view"
+    #   yaw   = about visual +z (up axis)       → "pan left/right, object moves horizontally in wrist view"
+    roll_ee_deg: float | None = None
     pitch_ee_deg: float | None = None
     yaw_ee_deg: float | None = None
-    roll_ee_deg: float | None = None
-    axis_name_ee: str | None = None  # 'pitch_ee' | '-pitch_ee' | ... | 'mixed-axis-ee'
+    axis_name_ee: str | None = None  # 'roll_ee' | 'pitch_ee' | 'yaw_ee' | '-roll_ee' | ... | 'mixed-axis-ee'
 
     def _rot_str_world(self) -> str:
         """Format rotation in world frame (existing behavior)."""
@@ -120,13 +118,14 @@ class PoseDelta:
             f"left={self.dy_cm:+.1f}cm, "
             f"up={self.dz_cm:+.1f}cm)"
         )
-        # EE-local projection (when available). Used for visual stage
-        # description — approximately matches the wrist camera view.
-        if self.dee_approach_cm is not None:
+        # EE-local "visual" projection (when available). Aircraft RPY
+        # convention attached to the gripper — closely matches wrist
+        # camera view (modulo a fixed mounting rotation).
+        if self.dee_forward_cm is not None:
             ee_str = (
-                f"  Δee=(approach={self.dee_approach_cm:+.1f}cm, "
-                f"perp_x={self.dee_perp_x_cm:+.1f}cm, "
-                f"perp_y={self.dee_perp_y_cm:+.1f}cm)"
+                f"  Δee=(forward={self.dee_forward_cm:+.1f}cm, "
+                f"left={self.dee_left_cm:+.1f}cm, "
+                f"up={self.dee_up_cm:+.1f}cm)"
             )
         else:
             ee_str = ""
@@ -246,40 +245,46 @@ def pose_delta(
     pitch_deg = float(angle_deg * axis[1])
     yaw_deg = float(angle_deg * axis[2])
 
-    # EE-local frame projections (position + rotation).
-    # R_world_ee maps EE-frame vectors to world; so R_world_ee.T maps
-    # a world-frame vector into EE-local frame. The source EE rotation
-    # (prev[3:6]) is the reference frame at the START of the delta.
-    dee_approach_cm = None
-    dee_perp_x_cm = None
-    dee_perp_y_cm = None
+    # EE-local "visual" frame projections (position + rotation).
+    # Mapping Franka EE (z=approach, x/y=lateral) to visual REP-103:
+    #   visual +x (forward) = EE +z (approach)
+    #   visual +y (left)    = EE +x  (assumed by default mount)
+    #   visual +z (up)      = EE +y  (assumed by default mount)
+    # This permutation IS a valid SO(3) rotation (right-handed).
+    dee_forward_cm = None
+    dee_left_cm = None
+    dee_up_cm = None
+    roll_ee_deg = None
     pitch_ee_deg = None
     yaw_ee_deg = None
-    roll_ee_deg = None
     axis_name_ee = None
     if ee_local:
         R_world_ee = _rotvec_to_matrix(prev[3:6])
-        # Position delta in EE frame.
+        # Position delta in EE local frame.
         dxyz_ee = R_world_ee.T @ dxyz_m
-        dee_perp_x_cm = float(dxyz_ee[0] * 100.0)
-        dee_perp_y_cm = float(dxyz_ee[1] * 100.0)
-        dee_approach_cm = float(dxyz_ee[2] * 100.0)
-        # Rotation axis re-expressed in source EE frame. The angle is
-        # invariant (rotations have an invariant magnitude); only the
-        # axis vector is rotated into the new frame.
+        # Re-label into visual frame:
+        dee_forward_cm = float(dxyz_ee[2] * 100.0)  # visual +x = EE +z
+        dee_left_cm    = float(dxyz_ee[0] * 100.0)  # visual +y = EE +x
+        dee_up_cm      = float(dxyz_ee[1] * 100.0)  # visual +z = EE +y
+        # Rotation axis re-expressed in source EE frame, then relabel
+        # to visual frame. RPY in visual frame:
+        #   roll  = about visual +x (forward)  → axis projection onto EE +z
+        #   pitch = about visual +y (left)     → axis projection onto EE +x
+        #   yaw   = about visual +z (up)       → axis projection onto EE +y
         axis_ee = R_world_ee.T @ np.asarray(axis, dtype=np.float64)
-        roll_ee_deg = float(angle_deg * axis_ee[0])
-        pitch_ee_deg = float(angle_deg * axis_ee[1])
-        yaw_ee_deg = float(angle_deg * axis_ee[2])
-        # Reuse classify_axis machinery for EE frame, append "_ee" suffix
-        # so the VLM cannot confuse it with the world-frame label.
-        abs_ax = np.abs(axis_ee)
+        roll_ee_deg  = float(angle_deg * axis_ee[2])  # forward axis
+        pitch_ee_deg = float(angle_deg * axis_ee[0])  # left axis
+        yaw_ee_deg   = float(angle_deg * axis_ee[1])  # up axis
+        # Dominant-axis classification in visual frame ordering.
+        # axis_visual = [axis_ee[2], axis_ee[0], axis_ee[1]] = (roll, pitch, yaw) projections.
+        axis_visual = np.array([axis_ee[2], axis_ee[0], axis_ee[1]])
+        abs_ax = np.abs(axis_visual)
         dom = int(np.argmax(abs_ax))
         if abs_ax[dom] < _AXIS_THRESHOLD:
             axis_name_ee = "mixed-axis-ee"
         else:
-            base = _AXIS_NAMES_POS[dom] + "_ee"
-            axis_name_ee = base if axis_ee[dom] >= 0 else f"-{base}"
+            base = _AXIS_NAMES_POS[dom] + "_ee"  # "roll_ee" / "pitch_ee" / "yaw_ee"
+            axis_name_ee = base if axis_visual[dom] >= 0 else f"-{base}"
 
     return PoseDelta(
         dx_cm=float(dxyz_m[0] * 100.0),
@@ -291,12 +296,12 @@ def pose_delta(
         roll_deg=roll_deg,
         pitch_deg=pitch_deg,
         yaw_deg=yaw_deg,
-        dee_approach_cm=dee_approach_cm,
-        dee_perp_x_cm=dee_perp_x_cm,
-        dee_perp_y_cm=dee_perp_y_cm,
+        dee_forward_cm=dee_forward_cm,
+        dee_left_cm=dee_left_cm,
+        dee_up_cm=dee_up_cm,
+        roll_ee_deg=roll_ee_deg,
         pitch_ee_deg=pitch_ee_deg,
         yaw_ee_deg=yaw_ee_deg,
-        roll_ee_deg=roll_ee_deg,
         axis_name_ee=axis_name_ee,
     )
 

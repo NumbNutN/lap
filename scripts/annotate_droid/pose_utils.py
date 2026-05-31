@@ -44,30 +44,42 @@ class PoseDelta:
     angle_deg: float
     axis_name: str   # 'yaw' | '-yaw' | 'pitch' | '-pitch' | 'roll' | '-roll' | 'mixed-axis'
     axis_unit: tuple[float, float, float]
-    # Per-axis decomposition (approximate, valid for small angles <30°).
-    # roll/pitch/yaw contributions in degrees, signed.
+    # WORLD-frame per-axis rotation decomposition (signed degrees).
+    # roll = about world +x (robot forward axis), pitch = about world +y
+    # (lateral axis), yaw = about world +z (vertical).
     roll_deg: float = 0.0
     pitch_deg: float = 0.0
     yaw_deg: float = 0.0
-    # EE-local frame projection of the position delta. Computed when
-    # pose_delta() has access to the source EE orientation (prev_pose's
-    # rotvec). Axes follow Franka EE convention (+z = approach direction
-    # / out of gripper jaws; +x, +y = perpendicular). For the wrist
-    # camera (rigidly mounted on the gripper flange), Δee_approach
-    # corresponds to "object getting closer in wrist view", and the
-    # perpendicular components map approximately to the wrist camera's
-    # in-plane axes up to a fixed mounting rotation.
+    # EE-local frame projection of the POSITION delta. Computed using
+    # the source pose's EE orientation (prev_pose's rotvec). Axes
+    # follow Franka EE convention (+z = approach direction / out of
+    # gripper jaws; +x, +y = perpendicular). For the wrist camera
+    # (rigidly mounted on the gripper flange), Δee_approach corresponds
+    # to "object getting closer in wrist view", and the perpendicular
+    # components map approximately to the wrist camera's in-plane axes
+    # up to a fixed mounting rotation.
     dee_approach_cm: float | None = None  # along EE +z
     dee_perp_x_cm: float | None = None    # along EE +x
     dee_perp_y_cm: float | None = None    # along EE +y
+    # EE-local frame rotation decomposition. SAME physical rotation as
+    # roll/pitch/yaw_deg above, just expressed in the SOURCE EE's local
+    # frame instead of world. The total magnitude (angle_deg) is
+    # identical — only the per-axis decomposition differs by frame.
+    # Naming convention (matches Δrot_world for VLM consistency):
+    #   pitch_ee = around EE +y axis
+    #   yaw_ee   = around EE +z axis (approach axis — "twist")
+    #   roll_ee  = around EE +x axis
+    pitch_ee_deg: float | None = None
+    yaw_ee_deg: float | None = None
+    roll_ee_deg: float | None = None
+    axis_name_ee: str | None = None  # 'pitch_ee' | '-pitch_ee' | ... | 'mixed-axis-ee'
 
-    def _rot_str(self) -> str:
-        """Format rotation as decomposed axes when mixed, single axis when clean."""
+    def _rot_str_world(self) -> str:
+        """Format rotation in world frame (existing behavior)."""
         if self.angle_deg < 0.5:
-            return "Δrot≈0°"
+            return "Δrot_world≈0°"
         if self.axis_name != "mixed-axis":
-            return f"Δrot={self.angle_deg:.0f}° {self.axis_name}"
-        # Decomposed: show top 2 contributing axes
+            return f"Δrot_world={self.angle_deg:.0f}° {self.axis_name}"
         parts = sorted([
             ("roll", self.roll_deg),
             ("pitch", self.pitch_deg),
@@ -75,10 +87,29 @@ class PoseDelta:
         ], key=lambda x: abs(x[1]), reverse=True)
         out = []
         for name, deg in parts[:2]:
-            if abs(deg) < 0.5:
-                continue
+            if abs(deg) < 0.5: continue
             out.append(f"{abs(deg):.0f}° {name}")
-        return "Δrot≈" + ("+".join(out) if out else f"{self.angle_deg:.0f}° mixed")
+        return "Δrot_world≈" + ("+".join(out) if out else f"{self.angle_deg:.0f}° mixed")
+
+    def _rot_str_ee(self) -> str:
+        """Format rotation in EE-local frame. Same magnitude as world,
+        different per-axis decomposition."""
+        if self.pitch_ee_deg is None:
+            return ""
+        if self.angle_deg < 0.5:
+            return "Δrot_ee≈0°"
+        if self.axis_name_ee and self.axis_name_ee != "mixed-axis-ee":
+            return f"Δrot_ee={self.angle_deg:.0f}° {self.axis_name_ee}"
+        parts = sorted([
+            ("roll_ee", self.roll_ee_deg),
+            ("pitch_ee", self.pitch_ee_deg),
+            ("yaw_ee", self.yaw_ee_deg),
+        ], key=lambda x: abs(x[1]), reverse=True)
+        out = []
+        for name, deg in parts[:2]:
+            if abs(deg) < 0.5: continue
+            out.append(f"{abs(deg):.0f}° {name}")
+        return "Δrot_ee≈" + ("+".join(out) if out else f"{self.angle_deg:.0f}° mixed-ee")
 
     def __str__(self) -> str:
         # Labelled axes in robot base frame (always present): x=forward,
@@ -99,7 +130,9 @@ class PoseDelta:
             )
         else:
             ee_str = ""
-        return f"{robot_str}{ee_str}  {self._rot_str()}"
+        rot_ee = self._rot_str_ee()
+        rot_part = self._rot_str_world() + (f"  {rot_ee}" if rot_ee else "")
+        return f"{robot_str}{ee_str}  {rot_part}"
 
 
 def _rotvec_to_matrix(rotvec: np.ndarray) -> np.ndarray:
@@ -213,22 +246,40 @@ def pose_delta(
     pitch_deg = float(angle_deg * axis[1])
     yaw_deg = float(angle_deg * axis[2])
 
-    # EE-local frame projection. R_world_ee maps EE-frame vectors to
-    # world; so R_world_ee.T maps a world vector into EE-local frame.
-    # The source EE rotation (prev[3:6]) is the reference frame at the
-    # START of the delta — that's what the camera saw when the motion
-    # was about to happen.
+    # EE-local frame projections (position + rotation).
+    # R_world_ee maps EE-frame vectors to world; so R_world_ee.T maps
+    # a world-frame vector into EE-local frame. The source EE rotation
+    # (prev[3:6]) is the reference frame at the START of the delta.
     dee_approach_cm = None
     dee_perp_x_cm = None
     dee_perp_y_cm = None
+    pitch_ee_deg = None
+    yaw_ee_deg = None
+    roll_ee_deg = None
+    axis_name_ee = None
     if ee_local:
         R_world_ee = _rotvec_to_matrix(prev[3:6])
+        # Position delta in EE frame.
         dxyz_ee = R_world_ee.T @ dxyz_m
-        # Franka EE convention: +z = approach direction (out of jaws);
-        # +x, +y = perpendicular axes (lateral).
         dee_perp_x_cm = float(dxyz_ee[0] * 100.0)
         dee_perp_y_cm = float(dxyz_ee[1] * 100.0)
         dee_approach_cm = float(dxyz_ee[2] * 100.0)
+        # Rotation axis re-expressed in source EE frame. The angle is
+        # invariant (rotations have an invariant magnitude); only the
+        # axis vector is rotated into the new frame.
+        axis_ee = R_world_ee.T @ np.asarray(axis, dtype=np.float64)
+        roll_ee_deg = float(angle_deg * axis_ee[0])
+        pitch_ee_deg = float(angle_deg * axis_ee[1])
+        yaw_ee_deg = float(angle_deg * axis_ee[2])
+        # Reuse classify_axis machinery for EE frame, append "_ee" suffix
+        # so the VLM cannot confuse it with the world-frame label.
+        abs_ax = np.abs(axis_ee)
+        dom = int(np.argmax(abs_ax))
+        if abs_ax[dom] < _AXIS_THRESHOLD:
+            axis_name_ee = "mixed-axis-ee"
+        else:
+            base = _AXIS_NAMES_POS[dom] + "_ee"
+            axis_name_ee = base if axis_ee[dom] >= 0 else f"-{base}"
 
     return PoseDelta(
         dx_cm=float(dxyz_m[0] * 100.0),
@@ -243,6 +294,10 @@ def pose_delta(
         dee_approach_cm=dee_approach_cm,
         dee_perp_x_cm=dee_perp_x_cm,
         dee_perp_y_cm=dee_perp_y_cm,
+        pitch_ee_deg=pitch_ee_deg,
+        yaw_ee_deg=yaw_ee_deg,
+        roll_ee_deg=roll_ee_deg,
+        axis_name_ee=axis_name_ee,
     )
 
 

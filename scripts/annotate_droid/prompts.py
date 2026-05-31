@@ -47,66 +47,79 @@ You receive:
      - **Interaction context tag** (when present): `pre_grasp`,
        `pre_release`, `post_grasp`, `post_release` — indicates this
        keyframe is near a grasp/release event.
+
      - **Pose deltas** — TWO complementary frames, both labelled.
 
        (1) `Δrobot=(forward=+X.Xcm, left=+Y.Ycm, up=+Z.Zcm)` — in the
-       **ROBOT BASE FRAME**. This is the control-frame ground truth and
-       is what your **action** field must use:
+       **ROBOT BASE FRAME**. This is the control-frame ground truth:
          - `forward=+5cm` means the EE moved 5 cm AWAY from the robot's
            mount (forward in robot frame). If +5cm forward appears as
            "moving right in the camera view" in the image, that's a
-           camera-frame artifact — the robot frame value is the truth.
+           camera-frame artifact.
          - `left=+5cm` means EE moved 5 cm to the robot's LEFT.
          - `up=+5cm` means EE rose 5 cm vertically.
 
-       (2) `Δee=(approach=+X.Xcm, perp_x=+Y.Ycm, perp_y=+Z.Zcm)` — in
-       the **EE-LOCAL FRAME** (rigidly attached to the gripper, so it
-       rotates with the wrist). This frame is approximately aligned
-       with the **wrist camera view**:
-         - `approach=+5cm` means the gripper moved 5 cm along its own
-           forward direction → in the wrist camera, this looks like
-           "the object got closer" (image content grows larger).
-         - `perp_x=+5cm` / `perp_y=+5cm` are the two perpendicular
-           directions (lateral). Their exact mapping to wrist
-           camera's "left/right/up/down" depends on the camera mount
-           orientation — you can read it off the wrist image directly
-           (e.g. if perp_x changes and an object visibly slides left
-           in wrist view, you've learned the mapping for this episode).
+        (2) `Δee=(forward=+X.Xcm, left=+Y.Ycm, up=+Z.Zcm, roll, pitch, yaw)` in
+        EE-LOCAL FRAME (axes attached to the gripper, rotating with the
+        wrist; closely matches the wrist camera view):
+
+            +x = forward — along the camera optical axis (the gripper's
+                approach direction). A positive +x motion makes objects
+                appear LARGER / CLOSER in the wrist camera view.
+            +y = left    — the camera's left direction. A positive +y motion
+                makes objects appear to slide to the RIGHT in the wrist view
+                (because moving the camera left shifts world content right).
+            +z = up      — the camera's up direction. A positive +z motion
+                makes objects appear to move DOWN in the wrist view (same
+                logic: moving the camera up shifts world content down).
+
+        Rotations about these axes (RPY in the EE-visual frame):
+            roll  (about +x)  — twist around the approach axis. In wrist
+                view the image rotates clockwise / counter-clockwise.
+            pitch (about +y)  — nod the gripper up or down. In wrist view
+                an object moves vertically (up/down) in the image.
+            yaw   (about +z)  — pan the gripper left or right. In wrist
+                view an object moves horizontally (left/right) in the image.
 
        Why both frames: the same physical motion has TWO honest
        descriptions. Δrobot is what the controller commands; Δee is
-       what the camera sees. Strict separation:
+       what the camera sees.
 
-       **ACTION FIELD — ABSOLUTE RULE**: directional words must come
-       ONLY from Δrobot signs. Do NOT consult Δee, the wrist camera,
-       or the external camera to choose left/right/forward/back/up/down
-       in action. The mapping is mechanical:
-         - "forward" / "back"  ↔  Δrobot.forward (sign>0 / sign<0)
-         - "left"    / "right" ↔  Δrobot.left    (sign>0 / sign<0)
-         - "up"      / "down"  ↔  Δrobot.up      (sign>0 / sign<0)
-       Action numbers come from `next-step Δrobot`. Period.
+    #    **ACTION FIELD — ABSOLUTE RULE**: directional words must come
+    #    ONLY from Δrobot signs. Do NOT consult Δee, the wrist camera,
+    #    or the external camera to choose left/right/forward/back/up/down
+    #    in action. The mapping is mechanical:
+    #      - "forward" / "back"  ↔  Δrobot.forward (sign>0 / sign<0)
+    #      - "left"    / "right" ↔  Δrobot.left    (sign>0 / sign<0)
+    #      - "up"      / "down"  ↔  Δrobot.up      (sign>0 / sign<0)
+    #    Action numbers come from `next-step Δrobot`. Period.
 
-       **STAGE FIELD — Δee allowed**: use Δee qualitatively for
-       visual grounding, e.g. "approach=+5cm closer to marker → wrist
-       view shows marker larger". Do NOT carry Δee numbers into action.
+    #    **STAGE FIELD — Δee allowed**: use Δee qualitatively for
+    #    visual grounding, e.g. "approach=+5cm closer to marker → wrist
+    #    view shows marker larger". Do NOT carry Δee numbers into action.
 
+    - **pose delta type**
        Every keyframe has a forward `next-step` delta (motion from this
-       keyframe to the next keyframe). Use this in **action** to
-       describe what motion to execute — it IS the human demonstration.
+       keyframe to the next keyframe). 
+       You can use this in **action** to describe what motion to execute — 
+       it IS the human demonstration.
 
        When the gripper is on a clear approach toward an upcoming
        grasp/release event (and not in the 2-frame transition window
        right after one), an additional gap line is provided:
          gap-to-grasp:   Δrobot=(forward=..., left=..., up=...)  Δrot=...
          gap-to-release: Δrobot=(forward=..., left=..., up=...)  Δrot=...
-       Use this in **stage** to describe the gripper's distance to its
-       current control target.
+        The gap is provided in both robot and EE frames
+       
+       You can use this in **stage** to describe the gripper's distance to its
+       current control target. But it depends, see detail in style guide below.
 
        Transition window (grasp/release frame + 2 frames after) shows
        only next-step — the gripper is settling, not aiming at a target.
        Post-final-release frames also have only next-step.
 
-       Rotation format: single-axis rotations show e.g. "11° pitch".
+    - **Rotation format**
+       single-axis rotations show e.g. "11° pitch".
        Multi-axis rotations are decomposed, e.g. "≈8° pitch+5° yaw"
        (the top 2 contributing axes).
 
@@ -171,6 +184,7 @@ STAGE STYLE GUIDE:
 
     A good stage is specific enough that a reader could identify WHICH keyframe it belongs to without seeing the frame index. 
 
+    Flexibly use external view and wrist view, give informative descriptions with strong visual grounding signal.
     
     gap-to-* is provided for most approach/transport keyframes. It tells
     you how far the gripper still has to go to reach the upcoming
@@ -260,6 +274,11 @@ ACTION STYLE GUIDE:
       **Post-grasp / post-release** (`post_grasp` / `post_release`):
           ✓ "Lift 2 cm to clear the table with the grasped cube"
           ✓ "Retract 3 cm above the pot rim"
+
+    Action description is based on the frame you choose.
+    Describe in robot base frame or wrist camera in relative frame (drone description style) are both ok, depending on which one has stronger visual grounding and clearer signal. For example, when wrist view shows a blank table with sparse landmarks, external camera view has a clearer signal to infer action in robot base frame. When the gripper is close to the target, wrist view has precise signal, obstacles to avoid, and less obstruction.
+
+    Tag the frame you choose is **a must to do** to avoid ambiguity. "in wrist camera view" "(wrist frame)", etc.
 
 
 THINK STYLE GUIDANCE:

@@ -246,11 +246,15 @@ def pose_delta(
     yaw_deg = float(angle_deg * axis[2])
 
     # EE-local "visual" frame projections (position + rotation).
-    # Mapping Franka EE (z=approach, x/y=lateral) to visual REP-103:
-    #   visual +x (forward) = EE +z (approach)
-    #   visual +y (left)    = EE +x  (assumed by default mount)
-    #   visual +z (up)      = EE +y  (assumed by default mount)
-    # This permutation IS a valid SO(3) rotation (right-handed).
+    # Mapping Franka EE (z=approach, x/y=lateral) to visual REP-103.
+    # Empirically calibrated against ep0 wrist images (kf6→kf9: pot
+    # moved from upper-left to upper-right in wrist view ↔ camera
+    # moved in image-left direction):
+    #   visual +x (forward) = +EE +z (approach)         — verified
+    #   visual +y (left)    = -EE +x (sign flipped)     — empirical
+    #   visual +z (up)      = -EE +y (sign flipped)     — empirical
+    # The sign flips on lateral axes still form a right-handed system:
+    #   visual_x × visual_y = EE_z × (-EE_x) = -EE_y = visual_z ✓
     dee_forward_cm = None
     dee_left_cm = None
     dee_up_cm = None
@@ -260,30 +264,25 @@ def pose_delta(
     axis_name_ee = None
     if ee_local:
         R_world_ee = _rotvec_to_matrix(prev[3:6])
-        # Position delta in EE local frame.
         dxyz_ee = R_world_ee.T @ dxyz_m
-        # Re-label into visual frame:
-        dee_forward_cm = float(dxyz_ee[2] * 100.0)  # visual +x = EE +z
-        dee_left_cm    = float(dxyz_ee[0] * 100.0)  # visual +y = EE +x
-        dee_up_cm      = float(dxyz_ee[1] * 100.0)  # visual +z = EE +y
-        # Rotation axis re-expressed in source EE frame, then relabel
-        # to visual frame. RPY in visual frame:
-        #   roll  = about visual +x (forward)  → axis projection onto EE +z
-        #   pitch = about visual +y (left)     → axis projection onto EE +x
-        #   yaw   = about visual +z (up)       → axis projection onto EE +y
+        dee_forward_cm = float(dxyz_ee[2] * 100.0)   # visual +x = +EE +z
+        dee_left_cm    = float(-dxyz_ee[0] * 100.0)  # visual +y = -EE +x
+        dee_up_cm      = float(-dxyz_ee[1] * 100.0)  # visual +z = -EE +y
+        # Rotation: project axis onto visual axes (same sign flips).
+        # roll  about visual +x (forward) → axis_ee[2]
+        # pitch about visual +y (left)    → -axis_ee[0]
+        # yaw   about visual +z (up)      → -axis_ee[1]
         axis_ee = R_world_ee.T @ np.asarray(axis, dtype=np.float64)
-        roll_ee_deg  = float(angle_deg * axis_ee[2])  # forward axis
-        pitch_ee_deg = float(angle_deg * axis_ee[0])  # left axis
-        yaw_ee_deg   = float(angle_deg * axis_ee[1])  # up axis
-        # Dominant-axis classification in visual frame ordering.
-        # axis_visual = [axis_ee[2], axis_ee[0], axis_ee[1]] = (roll, pitch, yaw) projections.
-        axis_visual = np.array([axis_ee[2], axis_ee[0], axis_ee[1]])
+        roll_ee_deg  = float(angle_deg * axis_ee[2])
+        pitch_ee_deg = float(angle_deg * (-axis_ee[0]))
+        yaw_ee_deg   = float(angle_deg * (-axis_ee[1]))
+        axis_visual = np.array([axis_ee[2], -axis_ee[0], -axis_ee[1]])
         abs_ax = np.abs(axis_visual)
         dom = int(np.argmax(abs_ax))
         if abs_ax[dom] < _AXIS_THRESHOLD:
             axis_name_ee = "mixed-axis-ee"
         else:
-            base = _AXIS_NAMES_POS[dom] + "_ee"  # "roll_ee" / "pitch_ee" / "yaw_ee"
+            base = _AXIS_NAMES_POS[dom] + "_ee"
             axis_name_ee = base if axis_visual[dom] >= 0 else f"-{base}"
 
     return PoseDelta(

@@ -47,17 +47,48 @@ You receive:
      - **Interaction context tag** (when present): `pre_grasp`,
        `pre_release`, `post_grasp`, `post_release` — indicates this
        keyframe is near a grasp/release event.
-     - **Pose deltas** — one or two lines depending on context.
+     - **Pose deltas** — TWO complementary frames, both labelled.
 
-       Format: `Δrobot=(forward=+X.Xcm, left=+Y.Ycm, up=+Z.Zcm)` —
-       **always in the ROBOT BASE FRAME**, with axes explicitly
-       labelled. The signs mean exactly what they say:
+       (1) `Δrobot=(forward=+X.Xcm, left=+Y.Ycm, up=+Z.Zcm)` — in the
+       **ROBOT BASE FRAME**. This is the control-frame ground truth and
+       is what your **action** field must use:
          - `forward=+5cm` means the EE moved 5 cm AWAY from the robot's
            mount (forward in robot frame). If +5cm forward appears as
            "moving right in the camera view" in the image, that's a
            camera-frame artifact — the robot frame value is the truth.
          - `left=+5cm` means EE moved 5 cm to the robot's LEFT.
          - `up=+5cm` means EE rose 5 cm vertically.
+
+       (2) `Δee=(approach=+X.Xcm, perp_x=+Y.Ycm, perp_y=+Z.Zcm)` — in
+       the **EE-LOCAL FRAME** (rigidly attached to the gripper, so it
+       rotates with the wrist). This frame is approximately aligned
+       with the **wrist camera view**:
+         - `approach=+5cm` means the gripper moved 5 cm along its own
+           forward direction → in the wrist camera, this looks like
+           "the object got closer" (image content grows larger).
+         - `perp_x=+5cm` / `perp_y=+5cm` are the two perpendicular
+           directions (lateral). Their exact mapping to wrist
+           camera's "left/right/up/down" depends on the camera mount
+           orientation — you can read it off the wrist image directly
+           (e.g. if perp_x changes and an object visibly slides left
+           in wrist view, you've learned the mapping for this episode).
+
+       Why both frames: the same physical motion has TWO honest
+       descriptions. Δrobot is what the controller commands; Δee is
+       what the camera sees. Strict separation:
+
+       **ACTION FIELD — ABSOLUTE RULE**: directional words must come
+       ONLY from Δrobot signs. Do NOT consult Δee, the wrist camera,
+       or the external camera to choose left/right/forward/back/up/down
+       in action. The mapping is mechanical:
+         - "forward" / "back"  ↔  Δrobot.forward (sign>0 / sign<0)
+         - "left"    / "right" ↔  Δrobot.left    (sign>0 / sign<0)
+         - "up"      / "down"  ↔  Δrobot.up      (sign>0 / sign<0)
+       Action numbers come from `next-step Δrobot`. Period.
+
+       **STAGE FIELD — Δee allowed**: use Δee qualitatively for
+       visual grounding, e.g. "approach=+5cm closer to marker → wrist
+       view shows marker larger". Do NOT carry Δee numbers into action.
 
        Every keyframe has a forward `next-step` delta (motion from this
        keyframe to the next keyframe). Use this in **action** to

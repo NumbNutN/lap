@@ -49,6 +49,17 @@ class PoseDelta:
     roll_deg: float = 0.0
     pitch_deg: float = 0.0
     yaw_deg: float = 0.0
+    # EE-local frame projection of the position delta. Computed when
+    # pose_delta() has access to the source EE orientation (prev_pose's
+    # rotvec). Axes follow Franka EE convention (+z = approach direction
+    # / out of gripper jaws; +x, +y = perpendicular). For the wrist
+    # camera (rigidly mounted on the gripper flange), Δee_approach
+    # corresponds to "object getting closer in wrist view", and the
+    # perpendicular components map approximately to the wrist camera's
+    # in-plane axes up to a fixed mounting rotation.
+    dee_approach_cm: float | None = None  # along EE +z
+    dee_perp_x_cm: float | None = None    # along EE +x
+    dee_perp_y_cm: float | None = None    # along EE +y
 
     def _rot_str(self) -> str:
         """Format rotation as decomposed axes when mixed, single axis when clean."""
@@ -70,16 +81,25 @@ class PoseDelta:
         return "Δrot≈" + ("+".join(out) if out else f"{self.angle_deg:.0f}° mixed")
 
     def __str__(self) -> str:
-        # Labelled axes in robot base frame: x=forward, y=left, z=up.
-        # The label makes the convention unambiguous to the VLM, so it
-        # cannot mistake the axis order or the sign meaning (a previous
-        # mismatch source — see iteration_plan §Sprint 1.5).
-        return (
+        # Labelled axes in robot base frame (always present): x=forward,
+        # y=left, z=up. Used for action supervision (control-frame
+        # consistent).
+        robot_str = (
             f"Δrobot=(forward={self.dx_cm:+.1f}cm, "
             f"left={self.dy_cm:+.1f}cm, "
-            f"up={self.dz_cm:+.1f}cm)  "
-            f"{self._rot_str()}"
+            f"up={self.dz_cm:+.1f}cm)"
         )
+        # EE-local projection (when available). Used for visual stage
+        # description — approximately matches the wrist camera view.
+        if self.dee_approach_cm is not None:
+            ee_str = (
+                f"  Δee=(approach={self.dee_approach_cm:+.1f}cm, "
+                f"perp_x={self.dee_perp_x_cm:+.1f}cm, "
+                f"perp_y={self.dee_perp_y_cm:+.1f}cm)"
+            )
+        else:
+            ee_str = ""
+        return f"{robot_str}{ee_str}  {self._rot_str()}"
 
 
 def _rotvec_to_matrix(rotvec: np.ndarray) -> np.ndarray:
@@ -172,8 +192,16 @@ def classify_axis(axis_unit) -> str:
 def pose_delta(
     cur_pose: np.ndarray,    # shape (6,) — xyz + rotvec
     prev_pose: np.ndarray,   # shape (6,)
+    ee_local: bool = True,
 ) -> PoseDelta:
-    """Compute formatted pose delta from prev to current keyframe."""
+    """Compute formatted pose delta from prev to current keyframe.
+
+    When ``ee_local`` is True (default), also project the position
+    delta into the source pose's EE-local frame. This frame is rigidly
+    attached to the gripper, so it approximately matches the wrist
+    camera view (modulo a fixed mounting rotation that the VLM can
+    learn from the wrist image).
+    """
     cur = np.asarray(cur_pose, dtype=np.float64)
     prev = np.asarray(prev_pose, dtype=np.float64)
     dxyz_m = cur[:3] - prev[:3]
@@ -184,6 +212,24 @@ def pose_delta(
     roll_deg = float(angle_deg * axis[0])
     pitch_deg = float(angle_deg * axis[1])
     yaw_deg = float(angle_deg * axis[2])
+
+    # EE-local frame projection. R_world_ee maps EE-frame vectors to
+    # world; so R_world_ee.T maps a world vector into EE-local frame.
+    # The source EE rotation (prev[3:6]) is the reference frame at the
+    # START of the delta — that's what the camera saw when the motion
+    # was about to happen.
+    dee_approach_cm = None
+    dee_perp_x_cm = None
+    dee_perp_y_cm = None
+    if ee_local:
+        R_world_ee = _rotvec_to_matrix(prev[3:6])
+        dxyz_ee = R_world_ee.T @ dxyz_m
+        # Franka EE convention: +z = approach direction (out of jaws);
+        # +x, +y = perpendicular axes (lateral).
+        dee_perp_x_cm = float(dxyz_ee[0] * 100.0)
+        dee_perp_y_cm = float(dxyz_ee[1] * 100.0)
+        dee_approach_cm = float(dxyz_ee[2] * 100.0)
+
     return PoseDelta(
         dx_cm=float(dxyz_m[0] * 100.0),
         dy_cm=float(dxyz_m[1] * 100.0),
@@ -194,6 +240,9 @@ def pose_delta(
         roll_deg=roll_deg,
         pitch_deg=pitch_deg,
         yaw_deg=yaw_deg,
+        dee_approach_cm=dee_approach_cm,
+        dee_perp_x_cm=dee_perp_x_cm,
+        dee_perp_y_cm=dee_perp_y_cm,
     )
 
 
@@ -224,11 +273,11 @@ def _smoke():
     assert abs(d.angle_deg - 20.0) < 0.1
     assert d.axis_name == "-pitch"
 
-    # Test 5: compound rotation (yaw + pitch)
+    # Test 5: mixed-axis rotation (yaw + pitch) — decomposed in output
     yp = np.array([0.0, 0.0, 0.0, 0.0, math.radians(15), math.radians(15)])
     d = pose_delta(yp, p0)
-    print(f"compound 15°+15°: {d}")
-    assert d.axis_name == "compound"
+    print(f"mixed 15°+15°: {d}")
+    assert d.axis_name == "mixed-axis"
 
     print("\nAll smoke tests pass.")
 

@@ -158,6 +158,43 @@ reference for the time we revisit this.
 - [ ] **Next**: run full 50-ep with v4.4 format, verify alignment holds
       at scale
 
+### Sprint 1.6 — Dual-frame deltas (Δrobot + Δee for visual grounding)
+- [x] Add EE-local frame projection to `pose_utils.PoseDelta`:
+      `Δee=(approach=+X, perp_x=+Y, perp_y=+Z)`, computed as
+      `R_world_ee.T @ Δp_world` using the source pose's rotvec
+- [x] Update meta extractor to save wrist camera images per keyframe
+- [x] Update viewer's `LocalImageCache` to surface wrist + delta info
+- [x] Update prompt §"You receive" to describe both frames + their roles
+- [x] **v4.5 first attempt (loose rule)** — REGRESSION on dy:
+
+  | ep   | dy v4.4 | dy v4.5 |
+  |------|---------|---------|
+  | ep00 | 100%    | **42%**  (3/7) |
+  | ep34 | 100%    | **70%**  (7/10) |
+
+  Diagnosis: VLM started picking action directional words from
+  Δee.perp_y instead of Δrobot.left. Δee was meant for stage only,
+  but the loose "use Δee for visual grounding" wording wasn't strict.
+
+- [x] **v4.5.1 strict rule** — added absolute rule:
+  > Action directional words must come ONLY from Δrobot signs.
+  > Do NOT consult Δee, wrist image, or external image for action
+  > left/right/forward/back/up/down. Mapping is mechanical.
+
+- [x] **v4.5.1 verified** — alignment fully restored AND larger samples:
+
+  | ep   | dx (sign / n)   | dy (sign / n)   | dz (sign / n)   |
+  |------|-----------------|-----------------|-----------------|
+  | ep00 | 100% (8/8)      | **100% (6/6)**  | 100% (7/7)      |
+  | ep34 | 100% (15/15)    | **100% (12/12)**| 100% (8/8)      |
+
+  Stage now meaningfully uses wrist view:
+  > "Wrist image shows gripper fingers flanking the marker body"
+  > "Wrist image shows marker centered inside the pot"
+
+- [ ] **Next**: full 50-ep run with v4.5.1, decide whether the wrist
+  grounding pays off vs added input complexity
+
 ### Sprint 2 — Keyframe rule audit
 - [ ] Enumerate all keyframe pairs with gap <0.5s across all 50 eps
 - [ ] For each tight pair, log:

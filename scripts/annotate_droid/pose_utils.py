@@ -225,14 +225,25 @@ def pose_delta(
     cur_pose: np.ndarray,    # shape (6,) — xyz + rotvec
     prev_pose: np.ndarray,   # shape (6,)
     ee_local: bool = True,
+    T_ee_wrist: "np.ndarray | None" = None,  # (6,) hand-eye calib, optional
 ) -> PoseDelta:
     """Compute formatted pose delta from prev to current keyframe.
 
     When ``ee_local`` is True (default), also project the position
-    delta into the source pose's EE-local frame. This frame is rigidly
-    attached to the gripper, so it approximately matches the wrist
-    camera view (modulo a fixed mounting rotation that the VLM can
-    learn from the wrist image).
+    delta into a frame attached to the source-keyframe gripper.
+
+    Two modes for ``ee_local``:
+      - **Calibrated** (``T_ee_wrist`` provided): project into the
+        actual wrist camera frame using the hand-eye calibration
+        from DROID raw data (`{wrist}_left_gripper_offset`). Labels
+        forward/left/up correspond to the wrist camera's optical axis
+        and image axes (left-handed visual convention, matches what
+        the wrist camera shows).
+      - **Empirical** (``T_ee_wrist`` is None): fall back to the
+        Franka EE-local frame with the same axis labelling derived
+        empirically from ep0 observation (Opt 2; see Sprint 1.6 in
+        ``droid_annotation_iteration_plan.md``). Less accurate but
+        usable when raw calibration isn't available.
     """
     cur = np.asarray(cur_pose, dtype=np.float64)
     prev = np.asarray(prev_pose, dtype=np.float64)
@@ -264,19 +275,42 @@ def pose_delta(
     axis_name_ee = None
     if ee_local:
         R_world_ee = _rotvec_to_matrix(prev[3:6])
-        dxyz_ee = R_world_ee.T @ dxyz_m
-        dee_forward_cm = float(dxyz_ee[2] * 100.0)   # visual +x = +EE +z
-        dee_left_cm    = float(-dxyz_ee[0] * 100.0)  # visual +y = -EE +x
-        dee_up_cm      = float(-dxyz_ee[1] * 100.0)  # visual +z = -EE +y
-        # Rotation: project axis onto visual axes (same sign flips).
-        # roll  about visual +x (forward) → axis_ee[2]
-        # pitch about visual +y (left)    → -axis_ee[0]
-        # yaw   about visual +z (up)      → -axis_ee[1]
-        axis_ee = R_world_ee.T @ np.asarray(axis, dtype=np.float64)
-        roll_ee_deg  = float(angle_deg * axis_ee[2])
-        pitch_ee_deg = float(angle_deg * (-axis_ee[0]))
-        yaw_ee_deg   = float(angle_deg * (-axis_ee[1]))
-        axis_visual = np.array([axis_ee[2], -axis_ee[0], -axis_ee[1]])
+        if T_ee_wrist is not None:
+            # Calibrated path. Compose to get R_world_wrist (wrist camera
+            # orientation in world at the source keyframe), then express
+            # both the position delta and the rotation axis in wrist
+            # camera frame.
+            T_ee_wrist = np.asarray(T_ee_wrist, dtype=np.float64)
+            R_ee_wrist = _rotvec_to_matrix(T_ee_wrist[3:6])
+            R_world_wrist = R_world_ee @ R_ee_wrist
+            dxyz_local = R_world_wrist.T @ dxyz_m
+            axis_local = R_world_wrist.T @ np.asarray(axis, dtype=np.float64)
+            # Wrist camera frame: +x = image-right, +y = image-up,
+            # +z = optical axis (forward into scene). Map to visual
+            # left-handed convention for VLM labels:
+            #   forward = +wrist_z  (objects get closer when positive)
+            #   left    = -wrist_x  (image-left direction)
+            #   up      = +wrist_y  (image-up direction)
+            dee_forward_cm = float(dxyz_local[2] * 100.0)
+            dee_left_cm    = float(-dxyz_local[0] * 100.0)
+            dee_up_cm      = float(dxyz_local[1] * 100.0)
+            roll_ee_deg  = float(angle_deg * axis_local[2])      # about +forward
+            pitch_ee_deg = float(angle_deg * (-axis_local[0]))   # about +left
+            yaw_ee_deg   = float(angle_deg * axis_local[1])      # about +up
+            axis_visual = np.array([axis_local[2], -axis_local[0], axis_local[1]])
+        else:
+            # Empirical fallback (Franka EE-local, Opt 2 mapping). Used
+            # when raw calibration isn't available — kept for backward
+            # compatibility with the RLDS reader.
+            dxyz_ee = R_world_ee.T @ dxyz_m
+            axis_ee = R_world_ee.T @ np.asarray(axis, dtype=np.float64)
+            dee_forward_cm = float(dxyz_ee[2] * 100.0)
+            dee_left_cm    = float(-dxyz_ee[0] * 100.0)
+            dee_up_cm      = float(-dxyz_ee[1] * 100.0)
+            roll_ee_deg  = float(angle_deg * axis_ee[2])
+            pitch_ee_deg = float(angle_deg * (-axis_ee[0]))
+            yaw_ee_deg   = float(angle_deg * (-axis_ee[1]))
+            axis_visual = np.array([axis_ee[2], -axis_ee[0], -axis_ee[1]])
         abs_ax = np.abs(axis_visual)
         dom = int(np.argmax(abs_ax))
         if abs_ax[dom] < _AXIS_THRESHOLD:

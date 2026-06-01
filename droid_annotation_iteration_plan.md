@@ -195,6 +195,46 @@ reference for the time we revisit this.
 - [ ] **Next**: full 50-ep run with v4.5.1, decide whether the wrist
   grounding pays off vs added input complexity
 
+### Sprint 1.7 — Calibrated wrist frame (raw DROID hand-eye)
+Replaces the empirical Opt 2 mapping with the actual `T_ee_wrist`
+from DROID raw `camera_extrinsics/{wrist}_left_gripper_offset`.
+
+- [x] Found raw DROID release at `/data/datasets/droid_data_raw/1.0.1/`
+- [x] **Convention reverse-engineered** (see QA scripts under
+      `policy/lap/scripts/calibration_qa/`):
+  - `wrist_cam_extrinsics[t]` = T_world_cam (convention A)
+  - `*_gripper_offset[t]` = T_ee_wrist (constant; hand-eye calibration)
+  - Camera frame: +x image-right, +y image-up (REP-103), +z optical
+  - EE reference is panda_hand; gripper tip is +10 cm along EE +z
+- [x] **Validation**: EE → wrist-image projection lands at gripper tip
+      (verified on ep0 f0/f100/f200); wrist → ext2-image projection
+      lands near visible wrist mount (~200 px error on one tested ep
+      from default-intrinsic mismatch, acceptable for VLM labels)
+- [x] **MP4 vs h5 frame count**: systematically `mp4 = h5 - 1`
+      (verified on 30 sampled eps); use `min(T_h5, T_mp4)` for 1-to-1
+- [x] **Reader**: added `droid_reader.iter_droid_raw()` reading raw
+      HDF5 + MP4, returns `EpisodeBundle.T_ee_wrist`. Skips episodes
+      lacking `gripper_offset` or wrist MP4 and logs them.
+- [x] **`pose_delta`**: accepts `T_ee_wrist`; when provided, projects
+      Δp into the actual wrist camera frame via
+      `R_world_wrist = R_world_ee @ R_ee_wrist`. Falls back to
+      empirical Opt 2 when not provided.
+- [x] **Visual frame labels** (left-handed, intuitive for VLM):
+      - forward = +wrist_z (object closer = positive)
+      - left    = -wrist_x (image-left direction)
+      - up      = +wrist_y (image-up direction)
+      - roll about forward, pitch about left, yaw about up
+- [x] **Extractor**: `/tmp/extract_raw.py` switched to `iter_droid_raw`,
+      threads T_ee_wrist through, writes `calibrated_wrist_frame: true`
+      flag into meta.json. Tested on local sample (3 eps from AUTOLab).
+- [x] **QA scripts persisted** at
+      `policy/lap/scripts/calibration_qa/` with README — to be reused
+      for filtering bad-calibration episodes at scale.
+- [ ] **Next**: extract a larger batch (e.g. 50 eps across labs) from
+      raw data, re-run VLM annotation with calibrated Δee, compare
+      stage-quality on wrist-grounded descriptions vs the empirical
+      version
+
 ### Sprint 2 — Keyframe rule audit
 - [ ] Enumerate all keyframe pairs with gap <0.5s across all 50 eps
 - [ ] For each tight pair, log:

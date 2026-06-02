@@ -424,6 +424,42 @@ now (2026-05-30) the gap is acceptable and we keep single-pass.
 
 ---
 
+## Topic A — A_pred ↔ action supervision alignment (LOCKED 2026-06-01)
+
+Imitation-learning training depends on knowing **which keyframes' A_pred
+have ground-truth control signals** and **how far each A_pred's chunk
+extends in the demo timeline**. Schema additions:
+
+| Field (per keyframe) | Type | Meaning |
+|----------------------|------|---------|
+| `imitation_supervised` | bool | A_pred matches demo's intended motion → action regression head trains on this kf. False = pre-failure intervention OR post-failure recovery → action head skips. **Language CE loss always trains regardless.** |
+| `chunk_end_frame` | int \| null | Frame index where this chunk's commanded motion ends. Null when `imitation_supervised=false`. |
+
+### Rules
+
+1. **Divergence is monotone**: once `imitation_supervised=false`, all
+   subsequent kfs in the episode must also be false. Post-process
+   validator flags violations.
+2. **Heuristic default for `chunk_end_frame`**: next keyframe's
+   frame_idx. (Dense grasp/lift kfs → default fits; sparse
+   transport/approach kfs → VLM extends.)
+3. **VLM may override** chunk_end_frame within bounds:
+   - lower bound: current_frame_idx + 1
+   - upper bound: current_frame_idx + 60 (≈4s @15Hz)
+   - the override must be justifiable from A_pred semantics
+4. **Failure-episode chunk truncation**: the *last supervised kf*
+   before divergence should aggressively shorten chunk_end_frame to
+   avoid covering the failing motion. VLM is encouraged to read
+   intermediate frames (Topic C, future) to pick a safe truncation
+   point.
+
+### Training pipeline implication
+
+- Per-keyframe sample mask: `action_head_loss_mask = imitation_supervised`
+- Language-head loss is independent of this mask.
+- Action chunks are gathered from frame_idx → chunk_end_frame
+  inclusive; chunks of length 1 are valid (means "do the next step").
+
 ## Out of Scope (for now)
 
 - Camera extrinsic / pose-delta reprojection — too much engineering for

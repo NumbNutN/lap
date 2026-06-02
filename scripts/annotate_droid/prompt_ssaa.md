@@ -189,6 +189,41 @@ alternatives so the plan still leads to success. (The plan is
 agent-side intent; the episode-level `description` field instead
 narrates what actually happened in the demo, including failures.)
 
+## Action supervision marking
+
+Every keyframe carries two fields that tell the training pipeline
+whether and how far this A_pred maps onto the demo's control data:
+
+- `imitation_supervised: bool`
+  - **true** when A_pred is essentially the agent doing what the demo
+    did. The action regression head will learn from the demo's
+    control segment.
+  - **false** when A_pred diverges from the demo (pre-failure
+    intervention OR post-failure recovery). Action head skips this
+    keyframe; only the language CE loss on the A_pred text trains.
+  - Monotone rule: once you set false for a keyframe, every
+    subsequent keyframe in the episode must also be false.
+    Divergence is a one-way transition.
+
+- `chunk_end_frame: int | null`
+  - Frame index where this keyframe's commanded motion ends in the
+    demo timeline. Must be > current frame_idx and ≤ current +60.
+  - Set to `null` (or omit) when `imitation_supervised=false`
+    (no supervision applies).
+  - **Default heuristic** (you'll see this pre-filled in the meta as
+    `chunk_end_default`): the next keyframe's frame_idx. Adopt the
+    default unless your A_pred's semantic span suggests otherwise.
+  - **Extend** when A_pred describes a phase that spans multiple
+    keyframes (typical for "approach", "transport"). The extended
+    value should not pass the next imitation boundary or 60-frame cap.
+  - **Shorten** when A_pred completes mid-segment (e.g. "close the
+    gripper" finishes within a few frames; the rest of the segment
+    is its own thing).
+  - **Failure-edge truncation**: when the next keyframe is the start
+    of the failure (next kf has `imitation_supervised=false`),
+    aggressively shorten chunk_end_frame to before the failing
+    motion begins.
+
 ## Episode-level `description` field
 
 An episode-level free-text field (no loss; sits outside the keyframe
@@ -212,7 +247,9 @@ Strictly valid JSON, no markdown fence, no commentary:
       "S":       "<current scene>",
       "S_pred":  "<predicted key outcome + brief why>",
       "A":       "<demo telemetry>",
-      "A_pred":  "<at kf[0]: plan + first action. Otherwise: agent reasoning + action.>"
+      "A_pred":  "<at kf[0]: plan + first action. Otherwise: agent reasoning + action.>",
+      "imitation_supervised": <bool>,
+      "chunk_end_frame": <int | null>
     }
   ]
 }

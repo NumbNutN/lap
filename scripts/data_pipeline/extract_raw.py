@@ -116,6 +116,9 @@ def main():
                          "whose classification matches --whitelist-class")
     ap.add_argument("--whitelist-class", default="good",
                     help="comma-separated class list (default: good)")
+    ap.add_argument("--skip-pose-delta", action="store_true",
+                    help="don't pre-compute per-kf pose_delta_str "
+                         "(v3 paradigm: tools.py computes on demand)")
     args = ap.parse_args()
 
     # Load whitelist if provided
@@ -162,7 +165,10 @@ def main():
         ep_dir = os.path.join(out_root, _ep_dir_name(bundle.episode_id, idx))
         os.makedirs(ep_dir, exist_ok=True)
 
-        delta_strs = compute_pose_delta_strs(kfs, bundle.ee_pose, bundle.T_ee_wrist)
+        if args.skip_pose_delta:
+            delta_strs = [None] * len(kfs)
+        else:
+            delta_strs = compute_pose_delta_strs(kfs, bundle.ee_pose, bundle.T_ee_wrist)
         near, ctx = compute_interaction_context(kfs)
 
         kf_records = []
@@ -175,17 +181,19 @@ def main():
                 w = Image.fromarray(bundle.wrist_loader(kf.t))
                 wrist_name = f"kf{i:02d}_f{kf.t:04d}_wrist.jpg"
                 w.save(f"{ep_dir}/{wrist_name}", quality=85)
-            kf_records.append({
+            rec = {
                 "idx": i,
                 "frame_idx": kf.t,
                 "type": kf.type,
                 "gripper_state": kf.gripper_state or "unknown",
                 "near_interaction": near[i],
                 "interaction_context": ctx[i],
-                "pose_delta_str": delta_strs[i],
                 "image_file": img_name,
                 "wrist_image_file": wrist_name,
-            })
+            }
+            if delta_strs[i] is not None:
+                rec["pose_delta_str"] = delta_strs[i]
+            kf_records.append(rec)
 
         meta = {
             "episode_id": bundle.episode_id,

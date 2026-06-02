@@ -12,3 +12,5 @@ videos/
 *.npz
 logs/
 data/
+
+**/local_data/

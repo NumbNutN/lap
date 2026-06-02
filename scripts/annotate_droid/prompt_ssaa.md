@@ -51,6 +51,19 @@ layout, wrist view for gripper-proximal detail.
 Describe what would matter to a manipulator. Don't catalog every
 distractor or fixture.
 
+**Causal anchor** (labels are non-Markovian): when the current scene
+reflects effects of past actions, reference them — e.g., "since the
+gripper just knocked the cup over, tokens are scattered to the right
+of the bowl."
+
+**Selective view**: you have two camera images (ext + wrist) but you
+don't have to mention both every keyframe. Only describe a view when
+it contributes visual info relevant to the next step. If the wrist
+view is just bare table (gripper far from contact) or the external
+view is just the back of the robot (uninformative for the current
+sub-goal), skip it. Same principle applies to **A** when phrasing the
+motion in terms of visual landmarks.
+
 ## S_pred — predicted key outcome after the next action
 
 **Purpose**: world-model target. Forecast the most important state
@@ -65,7 +78,11 @@ attention narrows to the thing that's about to change. That's the
 voice of S_pred.
 
 - Future tense, usually ≤ 1 sentence
-- Focus on the single most important change the action will produce
+- **Object-centric**: describe object relations/states (interaction,
+  approach, alignment), not the arm's own motion. The arm moving by
+  itself is uninteresting; only its relation to objects matters.
+  When no object relation changes, a minimal arm-motion line is fine
+  ("the arm will lift and sweep right").
 - Don't re-describe context already in S
 - **You may briefly include the reasoning behind which change is "key"**
   — what makes you confident this is what matters. e.g. "Because the
@@ -85,14 +102,23 @@ the motion that produces the next state. Also becomes the past-action
 prefix when conditioning later keyframes.
 **Loss**: none. Prefix-only.
 
-- Imperative phrasing, numbers directly from next-step Δrobot and/or Δee
-- Specify the frame ("robot frame" / "wrist frame") when you use
-  directional words
-- No reasoning, no goal language — A is what *happened*, mechanically
-- For genuinely free transport where exact numbers don't add information
-  (transient mid-flight samples), qualitative direction is fine — but
-  bias toward including the demo's numbers when they're available,
-  because the world model needs them
+- Imperative phrasing, numbers directly from next-step Δrobot or Δee
+- **Single-frame economy**: pick *one* frame, not both. Default to
+  robot-base for transport / free motion (wrist landmarks are weak
+  when far from contact); switch to wrist-frame for fine alignment
+  and contact-rich phases where landmarks are dense.
+- **Affordance call-out**: when motion features alignment, obstacle
+  avoidance, or contact geometry (e.g., approaching the rim from
+  above to clear the lip), say so — these are not "reasoning", they
+  are facts about what the motion is doing.
+- **Demo intent on retry/recovery**: when the keyframe is a retry,
+  re-grasp, or correction, explain the demo's intent ("re-aligning
+  after the first grasp slipped"), not just the cm/degree values.
+  For ordinary motions where nothing's remarkable, plain telemetry
+  is fine.
+- For genuinely free transport where exact numbers don't add
+  information (mid-flight samples), qualitative direction is fine —
+  but bias toward including demo numbers when available.
 
 ## A_pred — what an agent SHOULD do, given the observation
 
@@ -138,13 +164,20 @@ turn A_pred into "describe what the demo did" — that's A's job. Treat
 the demo as a sanity check that your reasoning produces a sensible
 trajectory, not as the source of the answer.
 
-**Failure episodes**: A_pred should describe what a competent agent
-would intend, even if the demo deviates from it. The point of
-labeling A_pred on failure data is to distill the annotator's broader
-knowledge (recovery, alternatives) into the policy — even when the
-demo itself failed. If the goal becomes unrecoverable, note it in
-the plan and write A_pred for the most reasonable continuation
-anyway.
+**Failure stance** — split by whether the failure has already occurred:
+
+- *Pre-failure* (current keyframe is before the visible failure event):
+  pretend **you don't know** the demo will fail. Reason as the competent
+  agent would from the current obs. If the demo here is the action
+  that causes the failure (e.g., sweeping into the cup), your A_pred
+  should diverge — propose the action that *avoids* the failure cause.
+
+- *Post-failure* (failure already happened, scene reflects damage):
+  enter recovery mode. Acknowledge the changed state ("the cup is
+  tipped on its side, tokens are scattered") and propose a sensible
+  next step ("retract upward, then re-approach the tipped cup from
+  the side to right it"). This distills broader knowledge into the
+  policy even when the demo cannot recover.
 
 ## Output
 

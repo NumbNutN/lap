@@ -15,6 +15,7 @@ role in the training loss.
 | `A_pred` | What a competent agent should do over the same span | policy target (CE) |
 | `chunk_end_frame` | Frame index where this phase's commanded motion ends | structural |
 | `imitation_supervised` | Whether A_pred matches the demo's intended motion | mask flag |
+| `phase_type` | Short tag naming the kind of phase | structural (analysis) |
 
 Two of these are *anchors* (S, A) and two are *predictions* (S_pred, A_pred).
 
@@ -124,6 +125,27 @@ absolute "must"s — apply when relevant.
   scattered). Enter recovery mode. Acknowledge state, propose a
   sensible recovery step.
 
+## phase_type
+
+Each keyframe's phase gets a short tag describing what kind of action it
+is. **Open vocabulary** — pick the most natural label for the phase.
+
+Reference labels you can use (or invent your own when none fit):
+
+- `begin` — opening hold; arm at home, no contact yet
+- `approach` — gross transport toward the target object
+- `fine_align` — final cm-scale alignment before contact
+- `pick` — grasp closure; from open-fingers-near-object to closed-on-object
+- `transport` — moving the held object through free space
+- `place` — lowering the held object toward its target
+- `release` — opening fingers; object detached
+- `failure` — the phase where the demo's action causes the visible failure
+- `recovery` — post-failure phase; agent diverging to repair / hold pose
+- `end` — final hold pose; episode terminating
+
+Lowercase, one or two words separated by underscore. Use the same label
+across keyframes that share a sub-goal (don't proliferate synonyms).
+
 ## First-frame plan
 
 At kf[0], `A_pred` must lead with a `"Plan: 1) ... 2) ... 3) ..."`
@@ -146,6 +168,7 @@ Strictly valid JSON, no markdown fence, no commentary:
     {
       "frame_idx": <int>,
       "mode_marker": "[think_act]",
+      "phase_type": "<short tag>",
       "S":       "<current scene>",
       "S_pred":  "<key outcome at chunk_end_frame, future tense>",
       "A":       "<demo motion over [frame_idx, chunk_end_frame]>",
@@ -164,4 +187,36 @@ Rules (minimal):
 - `chunk_end_frame` must satisfy `frame_idx < chunk_end_frame ≤ frame_idx + 60`.
 - Once `imitation_supervised` is set to `false`, all subsequent
   keyframes must also be `false`.
-- JSON only.
+- JSON only for the main annotation file.
+
+## Companion audit file (separate file)
+
+Alongside the main annotation, also write `<annotation_path>.audit.json`
+containing your reasoning trace. This is for human review — it does NOT
+train. Be honest about uncertainty.
+
+```json
+{
+  "image_reads": ["kf07_f0122_wrist.jpg", "kf08_f0139.jpg", ...],
+  "tool_calls": [
+    {"op": "pose_delta", "args": [0, 26], "purpose": "kf00 chunk"},
+    {"op": "pose_delta", "args": [0, 50], "purpose": "explored extending kf00 chunk — rejected"}
+  ],
+  "chunk_end_revisions": [
+    {"kf": 0, "considered": [26, 50], "chose": 26,
+     "why": "rejecting 50 — would cross into the active approach phase"}
+  ],
+  "key_decisions": [
+    {"kf": 8, "decision": "imitation_supervised flips to false here",
+     "why": "top-down handle pinch geometry will cause torque-over once lift starts"}
+  ],
+  "open_questions": [
+    "Uncertain whether kf11 cup state is fully tipped or mid-tip"
+  ]
+}
+```
+
+Be selective in `image_reads` — list keyframe-image filenames you actually
+looked at via the Read tool. Be selective in `tool_calls` — list the
+queries that shaped your final decisions, including ones you considered
+and abandoned. Empty arrays are fine when nothing notable happened.

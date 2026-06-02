@@ -25,7 +25,7 @@ from __future__ import annotations
 import argparse, csv, glob, json, os, sys
 from pathlib import Path
 
-REQUIRED_KF_FIELDS = ["S", "S_pred", "A", "A_pred",
+REQUIRED_KF_FIELDS = ["S", "S_pred", "A", "A_pred", "phase_type",
                       "chunk_end_frame", "imitation_supervised"]
 
 
@@ -53,6 +53,10 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         "desc_ok": False,
         "missing_fields": "",
         "first_diverge_kf": -1,
+        "n_tool_calls": 0,
+        "n_image_reads_claimed": 0,
+        "audit_self_present": False,
+        "phase_types": "",
         "errors": "",
     }
     try:
@@ -80,14 +84,17 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
     imit_seq: list[bool] = []
     chunk_ends: list[int] = []
     frame_idxs: list[int] = []
+    phase_types_seq: list[str] = []
 
     for i, kf in enumerate(ann_kfs):
         for f in REQUIRED_KF_FIELDS:
             if f not in kf:
                 missing.append(f"kf{i}:{f}")
                 continue
-            if f in {"S", "S_pred", "A", "A_pred"} and not str(kf[f]).strip():
+            if f in {"S", "S_pred", "A", "A_pred", "phase_type"} and not str(kf[f]).strip():
                 missing.append(f"kf{i}:{f}=empty")
+        if isinstance(kf.get("phase_type"), str):
+            phase_types_seq.append(kf["phase_type"])
 
         fi = int(kf.get("frame_idx", 0))
         ce = kf.get("chunk_end_frame")
@@ -126,6 +133,32 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         row["max_phase_len"] = max(phase_lens)
 
     row["missing_fields"] = ",".join(missing) if missing else ""
+    if phase_types_seq:
+        # Compact "type1×3,type2×2" form
+        from collections import OrderedDict
+        counts: dict[str, int] = OrderedDict()
+        for t in phase_types_seq:
+            counts[t] = counts.get(t, 0) + 1
+        row["phase_types"] = ",".join(f"{t}×{n}" for t, n in counts.items())
+
+    # Cross-check: tool_audit.jsonl (ground truth) vs companion .audit.json (self-report)
+    ep_dir = os.path.dirname(ann_path)
+    tool_log_path = os.path.join(ep_dir, ".tool_audit.jsonl")
+    if os.path.exists(tool_log_path):
+        try:
+            with open(tool_log_path) as f:
+                row["n_tool_calls"] = sum(1 for _ in f if _.strip())
+        except Exception:
+            pass
+    self_audit_path = ann_path + ".audit.json"
+    if os.path.exists(self_audit_path):
+        row["audit_self_present"] = True
+        try:
+            sa = json.load(open(self_audit_path))
+            ir = sa.get("image_reads") or []
+            row["n_image_reads_claimed"] = len(ir) if isinstance(ir, list) else 0
+        except Exception:
+            pass
     return row
 
 

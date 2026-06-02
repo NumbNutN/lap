@@ -64,13 +64,34 @@ For each keyframe in `get_keyframe_list`:
 2. **Reason** about the immediate next semantic phase given S and
    the task goal. What's the agent's intent here?
 3. **Decide `chunk_end_frame`** ∈ `[frame_idx + 1, frame_idx + 60]`.
-   - Default: next keyframe's `frame_idx`.
-   - Extend when intent spans multiple keyframes (approach/transport).
-   - Shorten when intent completes mid-segment (close-gripper finishes
-     in a few frames).
-   - If next keyframe begins a failure (you'll mark it
-     `imitation_supervised=false`), shorten to just before the failing
-     motion begins.
+
+   `chunk_end_frame` is a **semantic boundary, not a structural one.**
+   Ask: *when does the sub-intent named in A_pred complete?* That frame
+   is `chunk_end_frame`.
+
+   Granularity guide:
+   - **Free-space motion** (approach, retract, transport over the air)
+     → typically ONE phase spanning **multiple keyframes** (e.g. 4-6 kfs
+     merged into one "approach the cup" chunk). The rule-detector
+     keyframes sample the trajectory; they are NOT phase boundaries.
+   - **Contact-rich / fine-motor** (fine_align, grasp closure, place)
+     → may be 1-3 kfs.
+   - **Atomic events** (the actual grasp moment, the actual release
+     moment) → may be ≤ 5 frames.
+
+   **Anti-pattern check** — if you find yourself setting
+   `chunk_end_frame = next_kf.frame_idx` for many *consecutive* kfs
+   that share the same `phase_type`, you are almost certainly
+   under-merging. Re-check whether those kfs all belong to one
+   semantic phase.
+
+   Failure-edge exception: if the next keyframe begins a failure
+   (`imitation_supervised=false`), shorten to just before the failing
+   motion begins, even if it'd otherwise extend further.
+
+   For **every** `chunk_end_frame` choice, the companion `audit.json`
+   must record a one-line *why* — which sub-intent completes at that
+   frame.
 4. **Call `get_pose_delta(frame_idx, chunk_end_frame)`** to
    fetch the motion data for that span.
 5. (Optional) **Call `get_image(mid_frame, "wrist")`** to
@@ -203,8 +224,11 @@ train. Be honest about uncertainty.
     {"op": "pose_delta", "args": [0, 50], "purpose": "explored extending kf00 chunk — rejected"}
   ],
   "chunk_end_revisions": [
-    {"kf": 0, "considered": [26, 50], "chose": 26,
-     "why": "rejecting 50 — would cross into the active approach phase"}
+    {"kf": 0, "chose": 26,
+     "why": "home settle completes at kf01 — next phase (approach) is a distinct sub-intent"},
+    {"kf": 2, "chose": 114,
+     "why": "kfs 2-5 are one continuous approach to the cup; merging them keeps the A_pred coherent",
+     "considered": [53, 82, 114]}
   ],
   "key_decisions": [
     {"kf": 8, "decision": "imitation_supervised flips to false here",
@@ -220,3 +244,7 @@ Be selective in `image_reads` — list keyframe-image filenames you actually
 looked at via the Read tool. Be selective in `tool_calls` — list the
 queries that shaped your final decisions, including ones you considered
 and abandoned. Empty arrays are fine when nothing notable happened.
+
+**`chunk_end_revisions` must contain one entry per keyframe** (a `why` for
+every chunk_end_frame choice, not just the contentious ones). This is
+how human reviewers tell whether the boundary was reasoned or defaulted.

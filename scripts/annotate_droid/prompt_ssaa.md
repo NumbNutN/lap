@@ -179,13 +179,32 @@ trajectory, not as the source of the answer.
   the side to right it"). This distills broader knowledge into the
   policy even when the demo cannot recover.
 
+**First-frame plan**: at kf[0], A_pred must additionally lead with a
+*task-completion plan* — the multi-step arc the agent intends to
+execute across the whole episode, from the agent's POV. Format:
+"Plan: 1) ... 2) ... 3) ..." then the immediate kf[0] action. The
+plan always describes how to *complete* the task; for failure
+episodes, replace the demo's failing steps with non-failing
+alternatives so the plan still leads to success. (The plan is
+agent-side intent; the episode-level `description` field instead
+narrates what actually happened in the demo, including failures.)
+
+## Episode-level `description` field
+
+An episode-level free-text field (no loss; sits outside the keyframe
+array). Narrates the full episode arc from the human's POV — what
+actually happened in the demo, integrating any human hint. Includes
+failure modes when present ("the gripper swept laterally into the
+cup at kf10, knocking it over"). Distinct from the agent's plan
+(which lives in kf[0]'s A_pred and describes how to *succeed*).
+
 ## Output
 
 Strictly valid JSON, no markdown fence, no commentary:
 
 ```json
 {
-  "plan": "<2-5 sentences. Episode-level arc. If demo failed, say so.>",
+  "description": "<episode-level narrative; what the demo did>",
   "keyframes": [
     {
       "frame_idx": <int>,
@@ -193,7 +212,7 @@ Strictly valid JSON, no markdown fence, no commentary:
       "S":       "<current scene>",
       "S_pred":  "<predicted key outcome + brief why>",
       "A":       "<demo telemetry>",
-      "A_pred":  "<agent reasoning + action>"
+      "A_pred":  "<at kf[0]: plan + first action. Otherwise: agent reasoning + action.>"
     }
   ]
 }

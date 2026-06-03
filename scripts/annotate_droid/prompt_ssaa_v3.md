@@ -47,11 +47,14 @@ get_image(frame_idx, view="ext"|"wrist") -> JPEG bytes
 
 ## Frame conventions
 
-- **Robot base frame**: +forward = away from robot mount, +left = robot's
-  left, +up = vertical. Control-frame ground truth.
+- **Robot base frame**: motion in robot base frame
+  +forward = away from robot mount, +left = robot's
+  left, +up = vertical. 
 - **Wrist camera frame** (at idx1's EE orientation): +forward =
   optical axis (objects closer when positive); +left, +up = wrist
-  image axes. Use for visual-grounding descriptions.
+  image axes. motion is more ituitive in wrist view because it is 
+  a relative frame based on current wrist pose. Use for 
+  visual-grounding descriptions.
 
 When you write directional words in A or A_pred, declare the frame
 once and stick with it for that sentence.
@@ -104,19 +107,39 @@ For each keyframe in `get_keyframe_list`:
      post-failure recovery). Once false, **every subsequent kf must
      also be false** — divergence is monotone.
 
+## No meta-narrative leakage
+
+`S`, `S_pred`, `A`, `A_pred`, `description` are the deployed model's CE
+targets — at inference it sees only observations, never frame indices,
+keyframes, chunks, or any awareness of a demo. So these fields must
+never contain `kfXX`, `frame N`, `chunk_end`, `the demo`,
+`demonstration`, or workflow-level concepts. Express timing naturally
+("just before the gripper closes", "a moment later"), not via indices.
+`audit.json` is exempt.
+
 ## Named patterns (apply where relevant)
 
 Each pattern names a recurring concern you should respect. None are
 absolute "must"s — apply when relevant.
 
+## S — current scene
+
 - **Causal anchor**: S references past-action effects when the scene
   still shows them ("since the gripper just knocked the cup over,
   tokens are scattered…"). Labels are non-Markovian.
 - **Selective view**: don't describe both cameras every keyframe;
-  skip a view that adds no info for the current sub-goal.
-- **Object-centric S_pred**: forecast object relations/states, not the
+  skip a view that adds no info for the current sub-goal. Wrist view
+  may sometime loses landmark, while external view do not provide detail
+  when dexterous operation and is more easily obstructed
+
+## S_pred — predicted key outcome after the next action
+
+- **Object-centric**: forecast object relations/states, not the
   arm's own motion. If only the arm moves and no object relation
   changes, a minimal arm-motion line is fine.
+
+## A — what the human demo physically did
+
 - **Single-frame economy**: A picks robot OR wrist frame, not both.
   Default robot for transport (weak wrist landmarks); wrist for fine
   alignment / contact-rich phases.
@@ -132,17 +155,17 @@ absolute "must"s — apply when relevant.
 - **Justify from current obs alone**: if you couldn't defend a number
   to someone who only sees what you see right now, use qualitative
   language instead.
+
+## A_pred — what an agent SHOULD do, given the observation
+
 - **No peek-ahead in A_pred**: you can see future keyframes, but
   A_pred is the agent's reasoning from o_t and the goal. Treat the
   future as a sanity check, not the source.
-
-## Failure stance
-
-- **Pre-failure**: at the keyframe just before a visible failure event,
+- **Failure stance: Pre-failure**: at the keyframe just before a visible failure event,
   pretend you don't know it's coming. If the demo's motion here causes
   the failure, your A_pred should diverge — propose the action that
   avoids it. Set `imitation_supervised=false` from this kf onward.
-- **Post-failure**: the scene shows damage (cup tipped, tokens
+- **Failure stance: Post-failure**: the scene shows damage (cup tipped, tokens
   scattered). Enter recovery mode. Acknowledge state, propose a
   sensible recovery step.
 

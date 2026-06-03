@@ -60,9 +60,14 @@ get_image(frame_idx, view="ext"|"wrist") -> JPEG bytes
 State the reference frame (robot base *or* wrist view) before any
 forward/left/up or roll/pitch/yaw, e.g. "in the wrist view, pitch down
 ~30°" — not a bare "pitch ~30°". Pick one frame per sentence and keep it.
-A rotation magnitude must be the value over **this kf's own
-`[frame_idx, chunk_end_frame]` span** (from `get_pose_delta`), never a
-number borrowed from a longer or later span you explored.
+
+**Action must not cross the phase boundary.** `A` and `A_pred` describe
+ONLY the motion inside this kf's own `[frame_idx, chunk_end_frame]` span.
+Every magnitude (cm and °) must be the `get_pose_delta(frame_idx,
+chunk_end_frame)` value for *that* span — never a number carried over
+from a longer or later span you explored while deciding the boundary.
+If a motion (e.g. a large reorientation) only completes after
+`chunk_end_frame`, it belongs to a later keyframe, not this one.
 
 ## Per-keyframe workflow
 

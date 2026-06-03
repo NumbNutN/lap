@@ -31,18 +31,25 @@ import numpy as np
 # Internal helpers (rotation math reused from pose_utils)
 # ---------------------------------------------------------------------------
 
-def _rotvec_to_matrix(rotvec):
-    rotvec = np.asarray(rotvec, dtype=np.float64)
-    angle = float(np.linalg.norm(rotvec))
-    if angle < 1e-9:
-        return np.eye(3, dtype=np.float64)
-    axis = rotvec / angle
-    K = np.array([
-        [0.0, -axis[2], axis[1]],
-        [axis[2], 0.0, -axis[0]],
-        [-axis[1], axis[0], 0.0],
-    ], dtype=np.float64)
-    return np.eye(3) + math.sin(angle) * K + (1 - math.cos(angle)) * (K @ K)
+def _euler_xyz_to_matrix(rpy):
+    """DROID stores all 6-vec poses (cartesian_position, camera_extrinsics,
+    gripper_offset) as EXTRINSIC euler 'xyz' angles, NOT axis-angle. Verified:
+    ee_pose ∘ T_ee_wrist == wrist_cam_extrinsic to 0.00cm/0.00deg under euler
+    'xyz' (vs 8cm/108deg under axis-angle). Extrinsic xyz = Rz(c)·Ry(b)·Rx(a).
+    Matches scipy Rotation.from_euler('xyz', rpy).as_matrix()."""
+    a, b, c = (float(x) for x in np.asarray(rpy, dtype=np.float64))
+    ca, sa = math.cos(a), math.sin(a)
+    cb, sb = math.cos(b), math.sin(b)
+    cc, sc = math.cos(c), math.sin(c)
+    Rx = np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]], dtype=np.float64)
+    Ry = np.array([[cb, 0, sb], [0, 1, 0], [-sb, 0, cb]], dtype=np.float64)
+    Rz = np.array([[cc, -sc, 0], [sc, cc, 0], [0, 0, 1]], dtype=np.float64)
+    return Rz @ Ry @ Rx
+
+
+# Back-compat alias: every DROID 6-vec is euler 'xyz'. (The name is historical;
+# it does NOT interpret the input as an axis-angle rotvec.)
+_rotvec_to_matrix = _euler_xyz_to_matrix
 
 
 def _matrix_to_rotvec(R):

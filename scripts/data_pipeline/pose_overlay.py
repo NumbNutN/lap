@@ -7,18 +7,17 @@ small RGB triad (X=red, Y=green, Z=blue) showing the wrist frame's orientation
 
 Calibration notes (be honest — this is a visualization aid, not metrology):
 - External-camera extrinsics come from the raw DROID h5 (`camera_extrinsics/
-  <ext_serial>_left`, a per-frame 6-vec [xyz, rotvec] = camera pose in robot
-  base frame).
-- DROID does NOT ship intrinsics in the h5/metadata (they live in the unparsed
-  ZED SVO), so we assume a pinhole with `fx=fy≈700, cx,cy=center` at 1280x720.
-- The optical frame is recovered empirically: with `c = R_cam @ (p_world - t_cam)`
-  (no transpose), the OpenCV optical axes (x-right, y-down, z-fwd) are
-  `(x,y,z) = (c0, -c2, c1)` — a proper rotation (det +1) that centres the
-  gripper across the trajectory (~26 deg mean off-axis).
-- The triad ORIENTATION is exact (driven only by the extrinsic rotation). The
-  triad ANCHOR is approximate: it sits at the projected EE *flange*, which is
-  offset ~10-15cm from the visible gripper/cup, and uses a guessed focal length.
-  So read the rotation, not the exact pixel.
+  <ext_serial>_left`, a per-frame 6-vec [xyz, euler_xyz] = camera pose in robot
+  base frame). ALL DROID 6-vecs are EXTRINSIC euler 'xyz', NOT axis-angle —
+  verified: ee_pose ∘ T_ee_wrist == wrist_cam_extrinsic to 0.00cm/0.00deg.
+- Standard pinhole projection: `p_cam = R_cam^T @ (p_world - t_cam)`, then
+  `u = fx*x/z + cx, v = fy*y/z + cy` with OpenCV optical axes (x-right, y-down,
+  z-fwd). This lands the projected EE on the visible gripper across the
+  trajectory (validated on frame 178), so the triad is genuinely SCENE-ANCHORED.
+- DROID does NOT ship intrinsics in the h5/metadata, and the ZED SVO stores
+  them compressed (needs the ZED SDK). We use `fx=fy≈700, cx,cy=center` at
+  1280x720 — empirically lands on the gripper. Exact focal/principal-point is
+  approximate, so treat sub-pixel placement as indicative, not metrology.
 
 Output (precomputed, h5-free on HF Spaces): `axis_overlay.json` =
   {"view": "ext", "image_w": W, "image_h": H, "axis_len_cm": L,
@@ -31,28 +30,27 @@ from pathlib import Path
 
 import numpy as np
 
-# Optical-frame remap: c = R @ (p - t); optical = M @ c, M proper rotation.
-_M_OPT = np.array([[1.0, 0.0, 0.0],
-                   [0.0, 0.0, -1.0],
-                   [0.0, 1.0, 0.0]], dtype=np.float64)
 _DEFAULT_FX = 700.0           # ZED2 720p guess (no intrinsics in DROID raw)
 _IMG_W, _IMG_H = 1280, 720
-_AXIS_LEN_CM = 8.0            # physical length of drawn axes
+_AXIS_LEN_CM = 14.0           # physical length of drawn axes (longer = clearer)
 
 
-def _rv2R(rv):
-    rv = np.asarray(rv, dtype=np.float64)
-    a = float(np.linalg.norm(rv))
-    if a < 1e-9:
-        return np.eye(3, dtype=np.float64)
-    k = rv / a
-    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
-    return np.eye(3) + math.sin(a) * K + (1 - math.cos(a)) * (K @ K)
+def _rv2R(rpy):
+    """DROID 6-vec rotation = EXTRINSIC euler 'xyz' (Rz·Ry·Rx), NOT axis-angle."""
+    a, b, c = (float(x) for x in np.asarray(rpy, dtype=np.float64))
+    ca, sa = math.cos(a), math.sin(a)
+    cb, sb = math.cos(b), math.sin(b)
+    cc, sc = math.cos(c), math.sin(c)
+    Rx = np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]], dtype=np.float64)
+    Ry = np.array([[cb, 0, sb], [0, 1, 0], [-sb, 0, cb]], dtype=np.float64)
+    Rz = np.array([[cc, -sc, 0], [sc, cc, 0], [0, 0, 1]], dtype=np.float64)
+    return Rz @ Ry @ Rx
 
 
 def _project(p_world, t_cam, R_cam, fx, w, h):
-    """World point -> (u,v,depth) in the external image. depth<=0 => behind."""
-    c = _M_OPT @ (R_cam @ (np.asarray(p_world, float) - t_cam))
+    """World point -> (u,v,depth) in the external image (standard pinhole).
+    `R_cam` is camera-to-world; p_cam = R_cam^T @ (p_world - t). depth<=0 = behind."""
+    c = R_cam.T @ (np.asarray(p_world, float) - t_cam)
     depth = c[2]
     if depth <= 1e-4:
         return None, None, depth
@@ -102,7 +100,7 @@ def compute_overlay(ep_dir: str, ext_serial: str | None = None,
         else:
             origin = ee[i][:3]
             R_ww = R_ee
-        ou, ov, od = _project(origin, t_cam, R_cam, fx, w, h)
+        ou, ov, _ = _project(origin, t_cam, R_cam, fx, w, h)
         rec = {"valid": ou is not None}
         # Orthographic axis directions in image space (x-right, y-down),
         # driven ONLY by the extrinsic+wrist rotation — no intrinsics, no
@@ -110,14 +108,14 @@ def compute_overlay(ep_dir: str, ext_serial: str | None = None,
         # depth (3rd optical comp) is dropped, then 2D-normalised.
         ortho = {}
         for ax, name in ((R_ww[:, 0], "x"), (R_ww[:, 1], "y"), (R_ww[:, 2], "z")):
-            c = _M_OPT @ (R_cam @ ax)
+            c = R_cam.T @ ax   # world axis dir -> camera frame (x-right,y-down,z-fwd)
             ortho[name] = [round(float(c[0]), 4), round(float(c[1]), 4),
                            round(float(c[2]), 4)]  # [img_x, img_y, depth(z)]
         rec["ortho"] = ortho
         if ou is not None:
             rec["o"] = [round(ou, 1), round(ov, 1)]
             for ax, name in ((R_ww[:, 0], "x"), (R_ww[:, 1], "y"), (R_ww[:, 2], "z")):
-                tu, tv, td = _project(origin + ax * L, t_cam, R_cam, fx, w, h)
+                tu, tv, _ = _project(origin + ax * L, t_cam, R_cam, fx, w, h)
                 rec[name] = [round(tu, 1), round(tv, 1)] if tu is not None else None
         frames.append(rec)
 

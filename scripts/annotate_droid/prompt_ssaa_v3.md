@@ -136,10 +136,10 @@ For each keyframe in `get_keyframe_list`:
 `S`, `S_pred`, `A`, `A_pred`, `description` are the deployed model's CE
 targets — at inference it sees only observations, never frame indices,
 keyframes, chunks, or any awareness of a demo. So these fields must
-never contain `kfXX`, `frame N`, `chunk_end`, `the demo`,
-`demonstration`, or workflow-level concepts. Express timing naturally
-("just before the gripper closes", "a moment later"), not via indices.
-`audit.json` is exempt.
+never contain `kfXX`, `frame N`, frame-count durations ("over 38 frames"),
+`chunk_end`, `the demo`, `demonstration`, or workflow-level concepts.
+Express timing physically (cm/°) or naturally ("just before the gripper
+closes", "briefly") — never via frame counts or indices. `audit.json` is exempt.
 
 ## Named patterns (apply where relevant)
 
@@ -162,21 +162,24 @@ absolute "must"s — apply when relevant.
   arm's own motion. If only the arm moves and no object relation
   changes, a minimal arm-motion line is fine.
 
-## A — what the human demo physically did (every keyframe)
+## A — the action over this span (every keyframe)
 
-`A` is grounded in the tool telemetry and is written on every keyframe —
-it is the world-model input always, and the BC target wherever
-`imitation_supervised=true`. On a failure keyframe `A` is the *wrong* motion
-the demo made — that is correct and intended (the world model learns from it).
+`A` is the action over `[frame_idx, chunk_end_frame]`, grounded in the tool
+telemetry. On every keyframe: world-model input always, and the BC target
+wherever `imitation_supervised=true`. On a failure keyframe it is the
+*wrong* action — correct and intended (the world model learns from it).
 
+- **Imperative, first-person**: write `A` as the move you make from the
+  current view ("descend ~27 cm to the rim and close"), not a past-tense
+  recount of the demo ("the arm moved…"). You own the action, not narrate it.
 - **Single-frame economy**: A picks robot OR wrist frame, not both.
   Default robot for transport (weak wrist landmarks); wrist for fine
   alignment / contact-rich phases.
 - **Affordance call-out**: when motion features alignment / obstacle
   avoidance / contact geometry, A says so (these are facts, not
   reasoning).
-- **Demo intent on retry**: at retry keyframes, A explains the demo's
-  intent ("re-aligning after slip"), not just numbers.
+- **Intent on retry**: at retry keyframes, name the intent ("re-align
+  after the slip"), not just numbers.
 
 ## Quantitative vs qualitative (applies to A *and* A_pred)
 

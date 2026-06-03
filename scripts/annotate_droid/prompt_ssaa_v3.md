@@ -1,8 +1,9 @@
 # SSAA v3 — tool-augmented annotation
 
 You produce annotation labels for a single DROID episode. Your output
-trains a joint **world model** + **policy**. Each field has a specific
-role in the training loss.
+trains a joint **world model** + a **reasoning policy** — a policy that
+mostly just acts, but occasionally stops to think. Each field has a
+specific role in the training loss.
 
 ## Field roles
 
@@ -11,13 +12,27 @@ role in the training loss.
 | `description` | Episode-level narrative of what the demo did | (none — context) |
 | `S` | Scene at this keyframe | prefix to predict `S_pred` |
 | `S_pred` | Predicted key state at `chunk_end_frame` | world-model target (CE) |
-| `A` | What the demo physically did over `[frame_idx, chunk_end_frame]` | prefix |
-| `A_pred` | What a competent agent should do over the same span | policy target (CE) |
-| `chunk_end_frame` | Frame index where this phase's commanded motion ends | structural |
-| `imitation_supervised` | Whether A_pred matches the demo's intended motion | mask flag |
+| `A` | What the demo physically did over `[frame_idx, chunk_end_frame]` | **always**: world-model input; and the policy/BC target |
+| `A_pred` | intended action when human domonstration fails  | policy target (CE), language-only |
+| `mode_marker` | `[act]` (routine) or `[think_act]` (deliberate) — you PREDICT this | the chain-of-thought gate |
+| `chunk_end_frame` | Frame where this phase's commanded motion ends | structural |
+| `imitation_supervised` | Whether the policy target follows the demo (`true`) or overrides it (`false`) | mask flag |
 | `phase_type` | Short tag naming the kind of phase | structural (analysis) |
 
-Two of these are *anchors* (S, A) and two are *predictions* (S_pred, A_pred).
+## The act / think gate
+
+`mode_marker` is your per-keyframe call — does this step need thought?
+- **`[act]`** — obvious move; write `A` only.
+- **`[think_act]`** — reasoning helps; also write `A_pred` (reason → intended action).
+
+Think when it adds value: kf0 (plan the task), precision/contact (alignment,
+attitude, grasp), ambiguous choices, anticipated risk, pre-failure, recovery.
+This is your judgment, not a function of `imitation_supervised`.
+
+Rules:
+- `A_pred` present ⟺ `[think_act]`.
+- `imitation_supervised=false` (`A_pred` overrides the demo) ⟹ `[think_act]`, and is monotone once false.
+- `A` is on every keyframe — even a failure is valid world-model data (`S + A → S_pred`).
 
 ## Tools you can call
 
@@ -79,8 +94,8 @@ For each keyframe in `get_keyframe_list`:
 3. **Decide `chunk_end_frame`** ∈ `[frame_idx + 1, frame_idx + 60]`.
 
    `chunk_end_frame` is a **semantic boundary, not a structural one.**
-   Ask: *when does the sub-intent named in A_pred complete?* That frame
-   is `chunk_end_frame`.
+   Ask: *when does this sub-intent complete?* (the one you name in `A`,
+   or in `A_pred` on a `[think_act]` step). That frame is `chunk_end_frame`.
 
    Granularity guide:
    - **Free-space motion** (approach, retract, transport over the air)
@@ -109,13 +124,12 @@ For each keyframe in `get_keyframe_list`:
    fetch the motion data for that span.
 5. (Optional) **Call `get_image(mid_frame, "wrist")`** to
    inspect an intermediate frame when you need finer judgment.
-6. **Write A** (telemetry from tool result), **S_pred** (forecast at
-   chunk_end_frame), **A_pred** (intent, with numbers if appropriate).
-7. **Set `imitation_supervised`**:
-   - `true` if A_pred matches the demo's intended motion.
-   - `false` if A_pred diverges (pre-failure intervention or
-     post-failure recovery). Once false, **every subsequent kf must
-     also be false** — divergence is monotone.
+6. **Write `A`** (the demo's motion over the span, grounded in the tool
+   result) and **`S_pred`** (forecast at chunk_end_frame). These two are
+   written on **every** keyframe.
+7. **Set `mode_marker` + `imitation_supervised`** per the act/think gate
+   above — write `A_pred` only on `[think_act]`; set `imitation_supervised
+   = false` where your action overrides the demo.
 
 ## No meta-narrative leakage
 
@@ -148,7 +162,12 @@ absolute "must"s — apply when relevant.
   arm's own motion. If only the arm moves and no object relation
   changes, a minimal arm-motion line is fine.
 
-## A — what the human demo physically did
+## A — what the human demo physically did (every keyframe)
+
+`A` is grounded in the tool telemetry and is written on every keyframe —
+it is the world-model input always, and the BC target wherever
+`imitation_supervised=true`. On a failure keyframe `A` is the *wrong* motion
+the demo made — that is correct and intended (the world model learns from it).
 
 - **Single-frame economy**: A picks robot OR wrist frame, not both.
   Default robot for transport (weak wrist landmarks); wrist for fine
@@ -156,35 +175,37 @@ absolute "must"s — apply when relevant.
 - **Affordance call-out**: when motion features alignment / obstacle
   avoidance / contact geometry, A says so (these are facts, not
   reasoning).
-- **Demo intent on retry**: at retry/recovery keyframes, A explains
-  the demo's intent ("re-aligning after slip"), not just numbers.
-- **Numbers as tool, not goal**: A_pred uses precise cm/° when
-  precision is the right level for that decision (alignment, attitude
-  aiming even from far away). Otherwise qualitative. The pose deltas
-  from the tool are reference values from a successful expert.
-- **Justify from current obs alone**: if you couldn't defend a number
-  to someone who only sees what you see right now, use qualitative
-  language instead.
+- **Demo intent on retry**: at retry keyframes, A explains the demo's
+  intent ("re-aligning after slip"), not just numbers.
 
-## A_pred — what an agent SHOULD do, given the observation
+## Quantitative vs qualitative (applies to A *and* A_pred)
 
-- **No peek-ahead in A_pred**: you can see future keyframes, but
-  A_pred is the agent's reasoning from o_t and the goal. Treat the
-  future as a sanity check, not the source.
-- **qualitative language or quantitive**
-  Use quantitative description when:
-    - Aiming the gripper's attitude (yaw/pitch/roll) (like raising a gun before shoot)
-    - Final-cm alignment before contact
-    - Any moment when "approach the cup" is not specific enough
-  Use qualitative language when:
-    - The motion is mostly about choosing a rough region/direction
-- **Failure stance: Pre-failure**: at the keyframe just before a visible failure event,
-  pretend you don't know it's coming. If the demo's motion here causes
-  the failure, your A_pred should diverge — propose the action that
-  avoids it. Set `imitation_supervised=false` from this kf onward.
-- **Failure stance: Post-failure**: the scene shows damage (cup tipped, tokens
-  scattered). Enter recovery mode. Acknowledge state, propose a
-  sensible recovery step.
+Language is open-vocabulary. Choose the level the decision needs:
+
+- **Quantitative** (precise cm/°) when:
+  - aiming the gripper's attitude (yaw/pitch/roll) — like raising a gun
+    before the shot;
+  - final-cm alignment before contact;
+  - any moment when a phrase like "approach the cup" is not specific enough.
+- **Qualitative** when the motion is mostly about choosing a rough
+  region / direction.
+- **Justify from current obs alone**: if you couldn't defend a number to
+  someone who only sees what you see right now, use qualitative language.
+  The pose deltas from the tool are reference values from a successful
+  expert, not a target to recite.
+
+## A_pred — the deliberation (on `[think_act]` steps)
+
+Chain-of-thought fused with the intended action, reasoned only from what
+is visible now.
+
+- **No peek-ahead**: reason from `o_t` and the goal; future keyframes are a
+  sanity check, not the source.
+- **Pre-failure** (`imitation_supervised=false`): pretend you don't know
+  the failure is coming; if the demo's motion here causes it, reason out
+  the action that avoids it.
+- **Recovery** (`imitation_supervised=false`): acknowledge the damage, reason
+  out a sensible repair step.
 
 ## phase_type
 
@@ -209,14 +230,10 @@ across keyframes that share a sub-goal (don't proliferate synonyms).
 
 ## First-frame plan
 
-At kf[0], `A_pred` must lead with a `"Plan: 1) ... 2) ... 3) ..."`
-block describing the full task arc from the agent's POV, then the
-immediate first-kf action. The plan describes how to *succeed*; for
-failure episodes, replace the demo's failing steps with non-failing
-alternatives.
-
-(The `description` field at episode level instead narrates what the
-demo actually did, success or failure.)
+kf0 is `[think_act]`: its `A_pred` leads with a `"Plan: 1) ... 2) ..."`
+block (the full task arc, agent POV) then the first-kf action. Plan how to
+*succeed* — for failure episodes, replace the demo's failing steps.
+(`description` instead narrates what the demo actually did.)
 
 ## Output schema
 
@@ -228,12 +245,12 @@ Strictly valid JSON, no markdown fence, no commentary:
   "keyframes": [
     {
       "frame_idx": <int>,
-      "mode_marker": "[think_act]",
+      "mode_marker": "[act]"  |  "[think_act]",
       "phase_type": "<short tag>",
       "S":       "<current scene>",
       "S_pred":  "<key outcome at chunk_end_frame, future tense>",
       "A":       "<demo motion over [frame_idx, chunk_end_frame]>",
-      "A_pred":  "<at kf[0]: plan + first action. Otherwise: intent + action.>",
+      "A_pred":  null  |  "<reasoning + intended action; kf0 leads with Plan>",
       "chunk_end_frame": <int>,
       "imitation_supervised": <bool>
     }
@@ -242,12 +259,10 @@ Strictly valid JSON, no markdown fence, no commentary:
 ```
 
 Rules (minimal):
-- `keyframes` length = number of keyframes returned by `get_keyframe_list`,
-  in order, with matching `frame_idx`.
-- `mode_marker` = "[think_act]" on every keyframe.
-- `chunk_end_frame` must satisfy `frame_idx < chunk_end_frame ≤ frame_idx + 60`.
-- Once `imitation_supervised` is set to `false`, all subsequent
-  keyframes must also be `false`.
+- `keyframes` length = `get_keyframe_list` length, in order, matching `frame_idx`.
+- `S`, `S_pred`, `A` on every keyframe; `A_pred` non-null iff `[think_act]`.
+- `mode_marker`, `A_pred`, `imitation_supervised` follow the act/think gate above.
+- `chunk_end_frame` satisfies `frame_idx < chunk_end_frame ≤ frame_idx + 60`.
 - JSON only for the main annotation file.
 
 ## Companion audit file (separate file)

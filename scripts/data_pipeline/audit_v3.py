@@ -25,8 +25,11 @@ from __future__ import annotations
 import argparse, csv, glob, json, os, sys
 from pathlib import Path
 
-REQUIRED_KF_FIELDS = ["S", "S_pred", "A", "A_pred", "phase_type",
+# S, S_pred, A are on every keyframe. A_pred is conditional (see gate rule).
+REQUIRED_KF_FIELDS = ["S", "S_pred", "A", "phase_type",
                       "chunk_end_frame", "imitation_supervised"]
+# Always-non-empty subset (A_pred handled separately by the act/think gate).
+NONEMPTY_FIELDS = {"S", "S_pred", "A", "phase_type"}
 
 
 def load_meta(ep_dir: str) -> dict | None:
@@ -52,6 +55,8 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         "max_phase_len": 0,
         "desc_ok": False,
         "missing_fields": "",
+        "gate_ok": True,
+        "gate_issues": "",
         "first_diverge_kf": -1,
         "n_tool_calls": 0,
         "n_image_reads_claimed": 0,
@@ -86,15 +91,34 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
     frame_idxs: list[int] = []
     phase_types_seq: list[str] = []
 
+    gate_issues = []
     for i, kf in enumerate(ann_kfs):
         for f in REQUIRED_KF_FIELDS:
             if f not in kf:
                 missing.append(f"kf{i}:{f}")
                 continue
-            if f in {"S", "S_pred", "A", "A_pred", "phase_type"} and not str(kf[f]).strip():
+            if f in NONEMPTY_FIELDS and not str(kf[f]).strip():
                 missing.append(f"kf{i}:{f}=empty")
         if isinstance(kf.get("phase_type"), str):
             phase_types_seq.append(kf["phase_type"])
+
+        # act/think gate. mode_marker is a FREE per-kf choice (a supervised
+        # step may still be [think_act]); we only check the invariants:
+        #   (1) A_pred present  iff  mode_marker == [think_act]
+        #   (2) imit == false   =>   [think_act]  (a divergence must be reasoned)
+        #   (3) kf0             =>   [think_act]  (the plan)
+        fi_g = int(kf.get("frame_idx", -1))
+        imit_g = kf.get("imitation_supervised")
+        has_apred = bool(str(kf.get("A_pred") or "").strip())
+        mm = str(kf.get("mode_marker", "")).strip()
+        is_think = (mm == "[think_act]") if mm else has_apred
+        if mm and (has_apred != (mm == "[think_act]")):
+            gate_issues.append(
+                f"kf{i}:A_pred={'set' if has_apred else 'null'}!={mm}")
+        if imit_g is False and not is_think:
+            gate_issues.append(f"kf{i}:imit=false-not-think")
+        if fi_g == 0 and not is_think:
+            gate_issues.append(f"kf{i}:kf0-not-think")
 
         fi = int(kf.get("frame_idx", 0))
         ce = kf.get("chunk_end_frame")
@@ -133,6 +157,8 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         row["max_phase_len"] = max(phase_lens)
 
     row["missing_fields"] = ",".join(missing) if missing else ""
+    row["gate_issues"] = ",".join(gate_issues) if gate_issues else ""
+    row["gate_ok"] = not gate_issues
     if phase_types_seq:
         # Compact "type1×3,type2×2" form
         from collections import OrderedDict

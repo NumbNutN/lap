@@ -56,8 +56,13 @@ get_image(frame_idx, view="ext"|"wrist") -> JPEG bytes
   a relative frame based on current wrist pose. Use for 
   visual-grounding descriptions.
 
-When you write directional words in A or A_pred, declare the frame
-once and stick with it for that sentence.
+**Ground every directional/rotational claim in a named subject first.**
+State the reference frame (robot base *or* wrist view) before any
+forward/left/up or roll/pitch/yaw, e.g. "in the wrist view, pitch down
+~30°" — not a bare "pitch ~30°". Pick one frame per sentence and keep it.
+A rotation magnitude must be the value over **this kf's own
+`[frame_idx, chunk_end_frame]` span** (from `get_pose_delta`), never a
+number borrowed from a longer or later span you explored.
 
 ## Per-keyframe workflow
 
@@ -161,6 +166,13 @@ absolute "must"s — apply when relevant.
 - **No peek-ahead in A_pred**: you can see future keyframes, but
   A_pred is the agent's reasoning from o_t and the goal. Treat the
   future as a sanity check, not the source.
+- **qualitative language or quantitive**
+  Use quantitative description when:
+    - Aiming the gripper's attitude (yaw/pitch/roll) (like raising a gun before shoot)
+    - Final-cm alignment before contact
+    - Any moment when "approach the cup" is not specific enough
+  Use qualitative language when:
+    - The motion is mostly about choosing a rough region/direction
 - **Failure stance: Pre-failure**: at the keyframe just before a visible failure event,
   pretend you don't know it's coming. If the demo's motion here causes
   the failure, your A_pred should diverge — propose the action that

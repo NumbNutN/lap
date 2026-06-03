@@ -119,6 +119,9 @@ def main():
     ap.add_argument("--skip-pose-delta", action="store_true",
                     help="don't pre-compute per-kf pose_delta_str "
                          "(v3 paradigm: tools.py computes on demand)")
+    ap.add_argument("--idx-start", type=int, default=0,
+                    help="starting integer for ep dir numbering "
+                         "(default 0; use 100 to avoid collision with existing failure batch)")
     args = ap.parse_args()
 
     # Load whitelist if provided
@@ -162,7 +165,7 @@ def main():
             print(f"  [skip] ep{idx} {bundle.episode_id}: no keyframes")
             continue
 
-        ep_dir = os.path.join(out_root, _ep_dir_name(bundle.episode_id, idx))
+        ep_dir = os.path.join(out_root, _ep_dir_name(bundle.episode_id, args.idx_start + n_done))
         os.makedirs(ep_dir, exist_ok=True)
 
         if args.skip_pose_delta:

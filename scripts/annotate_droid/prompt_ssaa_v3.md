@@ -12,27 +12,29 @@ specific role in the training loss.
 | `description` | Episode-level narrative of what the demo did | (none — context) |
 | `S` | Scene at this keyframe | prefix to predict `S_pred` |
 | `S_pred` | Predicted key state at `chunk_end_frame` | world-model target (CE) |
-| `A` | What the demo physically did over `[frame_idx, chunk_end_frame]` | **always**: world-model input; and the policy/BC target |
-| `A_pred` | intended action when human domonstration fails  | policy target (CE), language-only |
-| `mode_marker` | `[act]` (routine) or `[think_act]` (deliberate) — you PREDICT this | the chain-of-thought gate |
+| `A` | The demo's action over `[frame_idx, chunk_end_frame]` | **always**: world-model input; policy/BC target when supervised |
+| `A_correct` | A corrective action — present **only** when it overrides the demo (`imitation_supervised=false`) | policy target (CE), language-only |
 | `chunk_end_frame` | Frame where this phase's commanded motion ends | structural |
-| `imitation_supervised` | Whether the policy target follows the demo (`true`) or overrides it (`false`) | mask flag |
+| `imitation_supervised` | Policy target follows the demo (`true`, target=`A`) or overrides it (`false`, target=`A_correct`) | mask flag |
 | `phase_type` | Short tag naming the kind of phase | structural (analysis) |
 
-## The act / think gate
+## Thinking: inline `<think>…</think>`
 
-`mode_marker` is your per-keyframe call — does this step need thought?
-- **`[act]`** — obvious move; write `A` only.
-- **`[think_act]`** — reasoning helps; also write `A_pred` (reason → intended action).
+When a step needs deliberation, prefix the **policy-target field** with a
+`<think>…</think>` block (reasoning), then the action. The target is `A`
+when supervised, `A_correct` when not — so `<think>` lives in **one field
+per keyframe, never both**.
 
-Think when it adds value: kf0 (plan the task), precision/contact (alignment,
-attitude, grasp), ambiguous choices, anticipated risk, pre-failure, recovery.
-This is your judgment, not a function of `imitation_supervised`.
+- routine → `A`: `descend 5 cm and close` (no think)
+- deliberate (kf0 plan, precision/contact, ambiguity, risk) → `A`:
+  `<think>handle is narrow, align first</think> descend 5 cm and close`
+- failure/recovery → `A`: plain demo telemetry, may note the consequence
+  ("open fingers, so they clip the cup"); `A_correct`:
+  `<think>the cup is tipping… so instead…</think> release and re-orient`
 
-Rules:
-- `A_pred` present ⟺ `[think_act]`.
-- `imitation_supervised=false` (`A_pred` overrides the demo) ⟹ `[think_act]`, and is monotone once false.
-- `A` is on every keyframe — even a failure is valid world-model data (`S + A → S_pred`).
+Emitting `<think>` is your judgment — independent of `imitation_supervised`.
+`A` is written on every keyframe (even a failure is valid world-model data,
+`S + A → S_pred`).
 
 ## Tools you can call
 
@@ -76,7 +78,7 @@ State the reference frame (robot base *or* wrist view) before any
 forward/left/up or roll/pitch/yaw, e.g. "in the wrist view, pitch down
 ~30°" — not a bare "pitch ~30°". Pick one frame per sentence and keep it.
 
-**Action must not cross the phase boundary.** `A` and `A_pred` describe
+**Action must not cross the phase boundary.** `A` and `A_correct` describe
 ONLY the motion inside this kf's own `[frame_idx, chunk_end_frame]` span.
 Every magnitude (cm and °) must be the `get_pose_delta(frame_idx,
 chunk_end_frame)` value for *that* span — never a number carried over
@@ -94,8 +96,7 @@ For each keyframe in `get_keyframe_list`:
 3. **Decide `chunk_end_frame`** ∈ `[frame_idx + 1, frame_idx + 60]`.
 
    `chunk_end_frame` is a **semantic boundary, not a structural one.**
-   Ask: *when does this sub-intent complete?* (the one you name in `A`,
-   or in `A_pred` on a `[think_act]` step). That frame is `chunk_end_frame`.
+   Ask: *when does this sub-intent complete?* That frame is `chunk_end_frame`.
 
    Granularity guide:
    - **Free-space motion** (approach, retract, transport over the air)
@@ -124,16 +125,15 @@ For each keyframe in `get_keyframe_list`:
    fetch the motion data for that span.
 5. (Optional) **Call `get_image(mid_frame, "wrist")`** to
    inspect an intermediate frame when you need finer judgment.
-6. **Write `A`** (the demo's motion over the span, grounded in the tool
-   result) and **`S_pred`** (forecast at chunk_end_frame). These two are
-   written on **every** keyframe.
-7. **Set `mode_marker` + `imitation_supervised`** per the act/think gate
-   above — write `A_pred` only on `[think_act]`; set `imitation_supervised
-   = false` where your action overrides the demo.
+6. **Write `A`** (demo motion, grounded in the tool result) and **`S_pred`**
+   (forecast at chunk_end_frame) — on **every** keyframe.
+7. **Set `imitation_supervised`**; if `false`, also write **`A_correct`**
+   (the override). Add a `<think>…</think>` prefix to the policy-target
+   field wherever deliberation helps (see "Thinking" above).
 
 ## No meta-narrative leakage
 
-`S`, `S_pred`, `A`, `A_pred`, `description` are the deployed model's CE
+`S`, `S_pred`, `A`, `A_correct`, `description` are the deployed model's CE
 targets — at inference it sees only observations, never frame indices,
 keyframes, chunks, or any awareness of a demo. So these fields must
 never contain `kfXX`, `frame N`, frame-count durations ("over 38 frames"),
@@ -167,7 +167,9 @@ absolute "must"s — apply when relevant.
 `A` is the action over `[frame_idx, chunk_end_frame]`, grounded in the tool
 telemetry. On every keyframe: world-model input always, and the BC target
 wherever `imitation_supervised=true`. On a failure keyframe it is the
-*wrong* action — correct and intended (the world model learns from it).
+*wrong* action — correct and intended (the world model learns from it); no
+`<think>` there, but `A` may note the consequence ("open fingers, so they
+clip the cup").
 
 - **Imperative, first-person**: write `A` as the move you make from the
   current view ("descend ~27 cm to the rim and close"), not a past-tense
@@ -181,7 +183,7 @@ wherever `imitation_supervised=true`. On a failure keyframe it is the
 - **Intent on retry**: at retry keyframes, name the intent ("re-align
   after the slip"), not just numbers.
 
-## Quantitative vs qualitative (applies to A *and* A_pred)
+## Quantitative vs qualitative (applies to A *and* A_correct)
 
 Language is open-vocabulary. Choose the level the decision needs:
 
@@ -197,18 +199,16 @@ Language is open-vocabulary. Choose the level the decision needs:
   The pose deltas from the tool are reference values from a successful
   expert, not a target to recite.
 
-## A_pred — the deliberation (on `[think_act]` steps)
+## A_correct — the override (only when `imitation_supervised=false`)
 
-Chain-of-thought fused with the intended action, reasoned only from what
-is visible now.
+The corrective action, with a leading `<think>…</think>` (a correction is
+always reasoned). Reason only from what is visible now.
 
 - **No peek-ahead**: reason from `o_t` and the goal; future keyframes are a
   sanity check, not the source.
-- **Pre-failure** (`imitation_supervised=false`): pretend you don't know
-  the failure is coming; if the demo's motion here causes it, reason out
-  the action that avoids it.
-- **Recovery** (`imitation_supervised=false`): acknowledge the damage, reason
-  out a sensible repair step.
+- **Pre-failure**: pretend you don't know the failure is coming; if the
+  demo's motion here causes it, reason out the action that avoids it.
+- **Recovery**: acknowledge the damage, reason out a sensible repair step.
 
 ## phase_type
 
@@ -233,10 +233,10 @@ across keyframes that share a sub-goal (don't proliferate synonyms).
 
 ## First-frame plan
 
-kf0 is `[think_act]`: its `A_pred` leads with a `"Plan: 1) ... 2) ..."`
-block (the full task arc, agent POV) then the first-kf action. Plan how to
-*succeed* — for failure episodes, replace the demo's failing steps.
-(`description` instead narrates what the demo actually did.)
+kf0's `A` leads with a `<think>Plan: 1) ... 2) ...</think>` block (the full
+task arc, agent POV) then the first action. Plan how to *succeed* — for
+failure episodes, replace the demo's failing steps. (`description` instead
+narrates what the demo actually did.)
 
 ## Output schema
 
@@ -248,12 +248,11 @@ Strictly valid JSON, no markdown fence, no commentary:
   "keyframes": [
     {
       "frame_idx": <int>,
-      "mode_marker": "[act]"  |  "[think_act]",
       "phase_type": "<short tag>",
       "S":       "<current scene>",
       "S_pred":  "<key outcome at chunk_end_frame, future tense>",
-      "A":       "<demo motion over [frame_idx, chunk_end_frame]>",
-      "A_pred":  null  |  "<reasoning + intended action; kf0 leads with Plan>",
+      "A":       "<[<think>…</think>] action; kf0 leads with <think>Plan…</think>>",
+      "A_correct": null  |  "<<think>…</think> corrective action>",
       "chunk_end_frame": <int>,
       "imitation_supervised": <bool>
     }
@@ -263,9 +262,12 @@ Strictly valid JSON, no markdown fence, no commentary:
 
 Rules (minimal):
 - `keyframes` length = `get_keyframe_list` length, in order, matching `frame_idx`.
-- `S`, `S_pred`, `A` on every keyframe; `A_pred` non-null iff `[think_act]`.
-- `mode_marker`, `A_pred`, `imitation_supervised` follow the act/think gate above.
+- `S`, `S_pred`, `A` on every keyframe.
+- `A_correct` non-null **iff** `imitation_supervised == false`.
+- `<think>…</think>` prefixes at most ONE field per kf — the policy target
+  (`A` when supervised, `A_correct` when not). kf0's `A` leads with `<think>Plan…`.
 - `chunk_end_frame` satisfies `frame_idx < chunk_end_frame ≤ frame_idx + 60`.
+- `imitation_supervised` monotone: once `false`, stays `false`.
 - JSON only for the main annotation file.
 
 ## Companion audit file (separate file)
@@ -285,7 +287,7 @@ train. Be honest about uncertainty.
     {"kf": 0, "chose": 26,
      "why": "home settle completes at kf01 — next phase (approach) is a distinct sub-intent"},
     {"kf": 2, "chose": 114,
-     "why": "kfs 2-5 are one continuous approach to the cup; merging them keeps the A_pred coherent",
+     "why": "kfs 2-5 are one continuous approach to the cup; merging them keeps the action coherent",
      "considered": [53, 82, 114]}
   ],
   "key_decisions": [

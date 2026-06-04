@@ -102,23 +102,26 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         if isinstance(kf.get("phase_type"), str):
             phase_types_seq.append(kf["phase_type"])
 
-        # act/think gate. mode_marker is a FREE per-kf choice (a supervised
-        # step may still be [think_act]); we only check the invariants:
-        #   (1) A_pred present  iff  mode_marker == [think_act]
-        #   (2) imit == false   =>   [think_act]  (a divergence must be reasoned)
-        #   (3) kf0             =>   [think_act]  (the plan)
+        # Schema gate (A / A_correct + inline <think>). Invariants:
+        #   (1) A_correct present  iff  imitation_supervised == false
+        #   (2) <think> lives in the policy-target field only: A when
+        #       supervised, A_correct when not — so on a failure kf, A is
+        #       plain (no <think>).
+        #   (3) kf0's A leads with a <think> (the plan).
         fi_g = int(kf.get("frame_idx", -1))
         imit_g = kf.get("imitation_supervised")
-        has_apred = bool(str(kf.get("A_pred") or "").strip())
-        mm = str(kf.get("mode_marker", "")).strip()
-        is_think = (mm == "[think_act]") if mm else has_apred
-        if mm and (has_apred != (mm == "[think_act]")):
+        a_txt = str(kf.get("A") or "")
+        corr_txt = str(kf.get("A_correct") or "")
+        has_corr = bool(corr_txt.strip())
+        think_in_a = "<think>" in a_txt
+        think_in_corr = "<think>" in corr_txt
+        if has_corr != (imit_g is False):
             gate_issues.append(
-                f"kf{i}:A_pred={'set' if has_apred else 'null'}!={mm}")
-        if imit_g is False and not is_think:
-            gate_issues.append(f"kf{i}:imit=false-not-think")
-        if fi_g == 0 and not is_think:
-            gate_issues.append(f"kf{i}:kf0-not-think")
+                f"kf{i}:A_correct={'set' if has_corr else 'null'}!=imit{imit_g}")
+        if imit_g is False and think_in_a:
+            gate_issues.append(f"kf{i}:think-in-A-on-failure")
+        if fi_g == 0 and not think_in_a:
+            gate_issues.append(f"kf{i}:kf0-A-no-think")
 
         fi = int(kf.get("frame_idx", 0))
         ce = kf.get("chunk_end_frame")

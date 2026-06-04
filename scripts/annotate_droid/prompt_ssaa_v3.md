@@ -234,9 +234,10 @@ across keyframes that share a sub-goal (don't proliferate synonyms).
 ## First-frame plan
 
 kf0's `A` leads with a `<think>Plan: 1) ... 2) ...</think>` block (the full
-task arc, agent POV) then the first action. Plan how to *succeed* — for
-failure episodes, replace the demo's failing steps. (`description` instead
-narrates what the demo actually did.)
+task arc, agent POV) then the first action. Plan how to *succeed*; for a
+failure episode the plan still lays out the *correct* approach — never
+mention the failure or "the demo" (no field may reference a demo).
+(`description` instead narrates what the demo actually did.)
 
 ## Output schema
 

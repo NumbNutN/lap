@@ -225,8 +225,17 @@ def get_pose_delta(ep_path: str, idx1: int, idx2: int) -> dict:
         raise ValueError(f"idx2 must be > idx1; got {idx1} → {idx2}")
 
     delta = _compute_delta(state, idx1, idx2)
+    g = state.get("gripper_width")
+    gripper = None
+    if g is not None and idx1 < len(g) and idx2 < len(g):
+        # DROID gripper_position: ~0 = open, ~1 = closed.
+        def _glabel(v):
+            return "open" if v < 0.2 else ("closed" if v > 0.6 else "partial")
+        gripper = (f"{_glabel(g[idx1])}({g[idx1]:.2f}) → "
+                   f"{_glabel(g[idx2])}({g[idx2]:.2f})")
     return {
         **delta,
+        "gripper": gripper,
         "n_frames": idx2 - idx1,
         "interaction_events_in_range": _interaction_events_between(
             state["meta"], idx1, idx2),

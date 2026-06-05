@@ -72,6 +72,7 @@ get_pose_delta(idx1, idx2) -> {
     delta_ee:    {forward, left, up}  # cm, wrist camera frame at idx1
     delta_rot_world: "≈X° pitch+Y° roll"
     delta_rot_ee:    "≈X° pitch_ee+Y° yaw_ee"
+    gripper: "closed(0.80) → closed(0.91)"   # open/closed/partial at both ends
     n_frames: int
     interaction_events_in_range: [{frame_idx, type}]   # grasp/release inside
     gap_to_grasp:   {target_frame, delta_robot, delta_ee, ...} | None
@@ -170,6 +171,9 @@ absolute "must"s — apply when relevant.
 
 ## S — current scene
 
+- **Present only**: S is what's visible *now*. Never foreshadow the
+  upcoming action or its result ("fingers are about to open", "next it
+  will lift") — that belongs in the `<think>` or `S_pred`.
 - **Causal anchor**: S references past-action effects when the scene
   still shows them ("since the gripper just knocked the cup over,
   tokens are scattered…"). Labels are non-Markovian.
@@ -207,6 +211,9 @@ clip the cup").
 - **Imperative, first-person**: write `A` as the move you make from the
   current view ("descend ~27 cm to the rim and close"), not a past-tense
   recount of the demo ("the arm moved…"). You own the action, not narrate it.
+- **Grip from the tool, not the tag**: take open/close from `gripper` in
+  `get_pose_delta` (state at both span ends). A keyframe's `grasp`/`release`
+  tag marks where the event *begins* — the gripper may not have moved yet.
 - **Single-frame economy**: A picks robot OR wrist frame, not both.
   Default robot for transport (weak wrist landmarks); wrist for fine
   alignment / contact-rich phases.

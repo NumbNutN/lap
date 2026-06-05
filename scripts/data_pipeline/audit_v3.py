@@ -22,7 +22,7 @@ Usage:
       --out      /tmp/audit_v3.csv
 """
 from __future__ import annotations
-import argparse, csv, glob, json, os, sys
+import argparse, csv, glob, json, os, re, sys
 from pathlib import Path
 
 # S, S_pred, A are on every keyframe. A_pred is conditional (see gate rule).
@@ -57,6 +57,7 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         "missing_fields": "",
         "gate_ok": True,
         "gate_issues": "",
+        "n_spred_echoes_a": 0,
         "first_diverge_kf": -1,
         "n_tool_calls": 0,
         "n_image_reads_claimed": 0,
@@ -122,6 +123,12 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
             gate_issues.append(f"kf{i}:think-in-A-on-failure")
         if fi_g == 0 and not think_in_a:
             gate_issues.append(f"kf{i}:kf0-A-no-think")
+
+        # S_pred should describe the chunk_end *image*, not restate A's motion.
+        # Flag when S_pred echoes a cm/° magnitude verbatim from this kf's A.
+        sp_nums = set(re.findall(r"\d+\s*cm|\d+\s*°", str(kf.get("S_pred") or "")))
+        if sp_nums and (sp_nums & set(re.findall(r"\d+\s*cm|\d+\s*°", a_txt))):
+            row["n_spred_echoes_a"] += 1
 
         fi = int(kf.get("frame_idx", 0))
         ce = kf.get("chunk_end_frame")

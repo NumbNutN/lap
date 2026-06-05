@@ -121,12 +121,13 @@ For each keyframe in `get_keyframe_list`:
    For **every** `chunk_end_frame` choice, the companion `audit.json`
    must record a one-line *why* — which sub-intent completes at that
    frame.
-4. **Call `get_pose_delta(frame_idx, chunk_end_frame)`** to
-   fetch the motion data for that span.
-5. (Optional) **Call `get_image(mid_frame, "wrist")`** to
-   inspect an intermediate frame when you need finer judgment.
-6. **Write `A`** (demo motion, grounded in the tool result) and **`S_pred`**
-   (forecast at chunk_end_frame) — on **every** keyframe.
+4. **Call `get_pose_delta(frame_idx, chunk_end_frame)`** for the motion
+   (grounds `A`), and **`get_image(chunk_end_frame)`** for the end state
+   (grounds `S_pred`).
+5. (Optional) **`get_image(mid_frame)`** for an intermediate frame when you
+   need finer judgment.
+6. **Write `A`** (motion from the pose delta) and **`S_pred`** (the
+   chunk_end image read against `S`) — on **every** keyframe.
 7. **Set `imitation_supervised`**; if `false`, also write **`A_correct`**
    (the override). Add a `<think>…</think>` prefix to the policy-target
    field wherever deliberation helps (see "Thinking" above).
@@ -158,9 +159,15 @@ absolute "must"s — apply when relevant.
 
 ## S_pred — predicted key outcome after the next action
 
-- **Object-centric**: forecast object relations/states, not the
-  arm's own motion. If only the arm moves and no object relation
-  changes, a minimal arm-motion line is fine.
+Read from the **chunk_end image**, the way `A` is read from the pose delta.
+Describe what the chunk_end frame shows *changed* relative to `S`.
+
+- **Object-centric**: forecast object relations/states (cup now gripped /
+  inverted over the bowl / toppled), not the arm's own motion. If only the
+  arm moves with no object change, a minimal arm-state line is fine.
+- **Not a re-statement of `A`**: never echo `A`'s cm/° — that's the action,
+  not the outcome. S_pred is the *visible result* ("fingers now seated on
+  the cup body", "cup mouth-down over the bowl, tokens beginning to fall").
 
 ## A — the action over this span (every keyframe)
 

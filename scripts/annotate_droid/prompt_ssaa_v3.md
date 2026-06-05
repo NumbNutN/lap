@@ -118,20 +118,17 @@ For each keyframe in `get_keyframe_list`:
 3. **Decide `chunk_end_frame`** ∈ `[frame_idx + 1, frame_idx + 60]`.
 
    A **semantic boundary**: the frame where *this* sub-intent completes.
-   A keyframe is a re-anchor (re-observe, re-reason) and may sit mid-phase;
-   its `chunk_end_frame` still runs to intent completion — so consecutive
-   keyframes in one phase share (roughly) one `chunk_end_frame`, their chunks
-   overlapping rather than tiling end-to-end.
+   Keyframes only *sample* the trajectory — they are NOT phase boundaries.
+   So consecutive keyframes within one sub-intent share (roughly) one
+   `chunk_end_frame` (overlapping chunks); they must not tile from each
+   keyframe to the next. This holds in **contact** phases as much as
+   free-space — e.g. all 4-6 "approach" keyframes end at the arrival-above-
+   cup frame; both keyframes of a grasp closure end at the grip-secured
+   frame (never cut short to the next sampled keyframe).
 
-   **Align `chunk_end` to where the intent finishes — in contact phases as
-   much as free-space.** A grasp's `chunk_end` is the frame the grip is
-   secured, not the next sampled keyframe. Typical spans (sizes, not caps —
-   never cut short of the intent): free-space approach 4-6 keyframes, a
-   grasp/place a few, a truly instantaneous event ≤5 frames.
-
-   **Anti-pattern**: `chunk_end_frame = next_kf.frame_idx` across consecutive
-   same-`phase_type` keyframes is under-merging — extend to the shared intent
-   boundary.
+   **Anti-pattern**: `chunk_end = next_kf.frame_idx` repeated across
+   consecutive same-`phase_type` keyframes — that's tiling; extend them to
+   the shared intent boundary.
 
    Failure-edge exception: if the next keyframe begins a failure
    (`imitation_supervised=false`), shorten to just before the failing

@@ -210,9 +210,13 @@ clip the cup").
   tag marks where the event *begins* — the gripper may not have moved yet.
   Describe it qualitatively ("close the fingers", "release", "half-open") —
   never recite the raw 0–1 value.
-- **Single-frame economy**: A picks robot OR wrist frame, not both.
-  Default robot for transport (weak wrist landmarks); wrist for fine
-  alignment / contact-rich phases.
+- **Frame follows the view that grounds the action** (not the phase type):
+  use the frame of the camera that actually shows the gripper/object now.
+  Attitude/rotation reads naturally in the **wrist** frame (the object's
+  tilt against a fixed wrist view); gross workspace translation in the
+  **robot base** frame. When the external view is occluded but the object
+  fills the wrist view (e.g. an inverted-cup pour), use the wrist frame even
+  for transport — a robot-base number there is ungrounded proprioception.
 - **Affordance call-out**: when motion features alignment / obstacle
   avoidance / contact geometry, A says so (these are facts, not
   reasoning).

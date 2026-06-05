@@ -117,24 +117,21 @@ For each keyframe in `get_keyframe_list`:
    the task goal. What's the agent's intent here?
 3. **Decide `chunk_end_frame`** ∈ `[frame_idx + 1, frame_idx + 60]`.
 
-   `chunk_end_frame` is a **semantic boundary, not a structural one.**
-   Ask: *when does this sub-intent complete?* That frame is `chunk_end_frame`.
+   A **semantic boundary**: the frame where *this* sub-intent completes.
+   A keyframe is a re-anchor (re-observe, re-reason) and may sit mid-phase;
+   its `chunk_end_frame` still runs to intent completion — so consecutive
+   keyframes in one phase share (roughly) one `chunk_end_frame`, their chunks
+   overlapping rather than tiling end-to-end.
 
-   Granularity guide:
-   - **Free-space motion** (approach, retract, transport over the air)
-     → typically ONE phase spanning **multiple keyframes** (e.g. 4-6 kfs
-     merged into one "approach the cup" chunk). The rule-detector
-     keyframes sample the trajectory; they are NOT phase boundaries.
-   - **Contact-rich / fine-motor** (fine_align, grasp closure, place)
-     → may be 1-3 kfs.
-   - **Atomic events** (the actual grasp moment, the actual release
-     moment) → may be ≤ 5 frames.
+   **Align `chunk_end` to where the intent finishes — in contact phases as
+   much as free-space.** A grasp's `chunk_end` is the frame the grip is
+   secured, not the next sampled keyframe. Typical spans (sizes, not caps —
+   never cut short of the intent): free-space approach 4-6 keyframes, a
+   grasp/place a few, a truly instantaneous event ≤5 frames.
 
-   **Anti-pattern check** — if you find yourself setting
-   `chunk_end_frame = next_kf.frame_idx` for many *consecutive* kfs
-   that share the same `phase_type`, you are almost certainly
-   under-merging. Re-check whether those kfs all belong to one
-   semantic phase.
+   **Anti-pattern**: `chunk_end_frame = next_kf.frame_idx` across consecutive
+   same-`phase_type` keyframes is under-merging — extend to the shared intent
+   boundary.
 
    Failure-edge exception: if the next keyframe begins a failure
    (`imitation_supervised=false`), shorten to just before the failing
@@ -214,6 +211,8 @@ clip the cup").
 - **Grip from the tool, not the tag**: take open/close from `gripper` in
   `get_pose_delta` (state at both span ends). A keyframe's `grasp`/`release`
   tag marks where the event *begins* — the gripper may not have moved yet.
+  Describe it qualitatively ("close the fingers", "release", "half-open") —
+  never recite the raw 0–1 value.
 - **Single-frame economy**: A picks robot OR wrist frame, not both.
   Default robot for transport (weak wrist landmarks); wrist for fine
   alignment / contact-rich phases.

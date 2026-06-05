@@ -28,13 +28,34 @@ per keyframe, never both**.
 - routine → `A`: `descend 5 cm and close` (no think)
 - deliberate (kf0 plan, precision/contact, ambiguity, risk) → `A`:
   `<think>handle is narrow, align first</think> descend 5 cm and close`
-- failure/recovery → `A`: plain demo telemetry, may note the consequence
-  ("open fingers, so they clip the cup"); `A_correct`:
+- override the demo (`imit=false`) → `A`: plain demo telemetry, may note
+  the consequence ("open fingers, so they clip the cup"); `A_correct`:
   `<think>the cup is tipping… so instead…</think> release and re-orient`
 
 Emitting `<think>` is your judgment — independent of `imitation_supervised`.
-`A` is written on every keyframe (even a failure is valid world-model data,
+`A` is on every keyframe (even a failure is valid world-model data,
 `S + A → S_pred`).
+
+## Judging each step (`imitation_supervised`)
+
+Judge each keyframe against the **current observation**: would a competent
+agent, seeing only this, do what the demo does next? yes → `imit=true`
+(target `A`); no → `imit=false` (write `A_correct`, the better move).
+
+A demo can be wrong even in a *successful* episode — a needless **detour**
+it later undoes (grasp → release → re-grasp, object never moving). Don't
+rationalise it; split it:
+- the **mistake** → `imit=false` (`A` = the mistake, `A_correct` = the fix);
+- the demo's **own recovery** — it corrects itself and rejoins the good
+  path → `imit=true`: the demo's action *is* right here, so `A` alone
+  carries it; lead `A` with a `<think>` reading the state honestly ("the
+  cup isn't actually held — re-close"). This is recovery *with* a
+  ground-truth action, which a terminal failure can't give.
+
+So `imit` is **not monotone** — it may return to `true` once the demo
+recovers. (Only a terminal, unrecovered failure stays `false` to the end.)
+Labels are non-Markovian but **honest to the observation**: if the history
+implies the object is held yet the image shows open fingers, say so.
 
 ## Tools you can call
 
@@ -165,9 +186,14 @@ Describe what the chunk_end frame shows *changed* relative to `S`.
 - **Object-centric**: forecast object relations/states (cup now gripped /
   inverted over the bowl / toppled), not the arm's own motion. If only the
   arm moves with no object change, a minimal arm-state line is fine.
-- **Not a re-statement of `A`**: never echo `A`'s cm/° — that's the action,
-  not the outcome. S_pred is the *visible result* ("fingers now seated on
-  the cup body", "cup mouth-down over the bowl, tokens beginning to fall").
+- **No A-echo (hard rule)**: S_pred must not contain any cm/° that appears
+  in this kf's `A` — repeating the motion is restating the action, not the
+  outcome. S_pred is the *visible result* ("fingers now seated on the cup
+  body", "cup mouth-down over the bowl, tokens beginning to fall").
+- **The only numbers allowed** are a *residual to an upcoming target* — the
+  gap still remaining, not the motion just made ("~2 cm above the rim, one
+  short descent from grasp"), from `get_pose_delta(chunk_end → that contact
+  frame)`. Everything else is qualitative.
 
 ## A — the action over this span (every keyframe)
 
@@ -213,9 +239,11 @@ always reasoned). Reason only from what is visible now.
 
 - **No peek-ahead**: reason from `o_t` and the goal; future keyframes are a
   sanity check, not the source.
-- **Pre-failure**: pretend you don't know the failure is coming; if the
-  demo's motion here causes it, reason out the action that avoids it.
-- **Recovery**: acknowledge the damage, reason out a sensible repair step.
+- **Pre-failure / mistake**: pretend you don't know it's coming; if the
+  demo's motion here is wrong, reason out the action that avoids it.
+- **Imagined recovery** (no ground truth): the scene shows damage the demo
+  never repairs — acknowledge it, reason out a sensible repair step. (When
+  the demo *does* repair itself, that's `imit=true` — see "Judging each step".)
 
 ## phase_type
 
@@ -275,7 +303,8 @@ Rules (minimal):
 - `<think>…</think>` prefixes at most ONE field per kf — the policy target
   (`A` when supervised, `A_correct` when not). kf0's `A` leads with `<think>Plan…`.
 - `chunk_end_frame` satisfies `frame_idx < chunk_end_frame ≤ frame_idx + 60`.
-- `imitation_supervised` monotone: once `false`, stays `false`.
+- `imitation_supervised` is **not** monotone: it may return to `true` when
+  the demo recovers onto the good path (only a terminal failure stays `false`).
 - JSON only for the main annotation file.
 
 ## Companion audit file (separate file)

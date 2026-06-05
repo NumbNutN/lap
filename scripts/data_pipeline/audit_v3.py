@@ -5,7 +5,7 @@ Per-episode checks (one CSV row per annotation file):
   - n_kf_match        number of keyframes matches meta.json
   - frame_idx_match   all frame_idx values match meta.json
   - bounds_ok         every kf has frame_idx < chunk_end_frame ≤ frame_idx+60
-  - monotone_ok       once imitation_supervised=false, all subsequent are false
+  - n_recoveries      count of imitation_supervised F→T (legal demo self-recovery)
   - n_imit_true       count of imitation_supervised=true
   - n_imit_false      count of imitation_supervised=false
   - n_overlap_pairs   pairs (i, i+1) where kf[i].chunk_end_frame > kf[i+1].frame_idx
@@ -47,7 +47,8 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         "n_kf_match": False,
         "frame_idx_match": False,
         "bounds_ok": True,
-        "monotone_ok": True,
+        "monotone_ok": True,   # deprecated: imit may legally recover (F→T)
+        "n_recoveries": 0,     # count of F→T transitions (demo self-recovery)
         "n_imit_true": 0,
         "n_imit_false": 0,
         "n_overlap_pairs": 0,
@@ -147,15 +148,15 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
             if imit: row["n_imit_true"] += 1
             else:    row["n_imit_false"] += 1
 
-    # Monotone check + first diverge index
+    # First diverge index + count self-recoveries (F→T). imit is no longer
+    # required monotone — a demo may make a recoverable detour and rejoin.
     seen_false = False
     for i, v in enumerate(imit_seq):
         if v is False and not seen_false:
             seen_false = True
             row["first_diverge_kf"] = i
-        if seen_false and v is True:
-            row["monotone_ok"] = False
-            break
+        if i > 0 and imit_seq[i - 1] is False and v is True:
+            row["n_recoveries"] += 1
 
     # Overlap: kf[i].chunk_end_frame > kf[i+1].frame_idx
     for i in range(len(ann_kfs) - 1):

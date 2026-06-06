@@ -14,10 +14,10 @@ exact subagent prompt, and the validation gate). This file adds the loop.
      pexpect` and the pexpect login — **ask the user for the rotating password**);
    - pick a UNIQUE worker id and a private working dir:
      ```
-     cd /home/numbnut/worksapce/RoboTwin
+     cd <WORKSPACE>
      export SSAA_WORKER=auto-$$
-     export SSAA_RAW_EPS=/home/numbnut/worksapce/RoboTwin/policy/lap/local_data/raw_eps_$SSAA_WORKER
-     PY="policy/lap/.venv/bin/python3"; CLIENT="policy/lap/scripts/ssaa/ssaa_client.py"
+     export SSAA_RAW_EPS=<WORKSPACE>/lap/local_data/raw_eps_$SSAA_WORKER
+     PY="<WORKSPACE>/lap/.venv/bin/python3"; CLIENT="<WORKSPACE>/lap/scripts/ssaa/ssaa_client.py"
      ```
 2. Decide a stop rule with the user up front (e.g. "run until I stop you", or
    "stop after N idle checks", or a target episode count). Default: run until the
@@ -49,7 +49,7 @@ Repeat:
    Wait for all subagents in the batch to finish.
 5. **Validate the whole batch** before pushing:
    ```
-   $PY policy/lap/scripts/data_pipeline/audit_v3.py \
+   $PY <WORKSPACE>/lap/scripts/data_pipeline/audit_v3.py \
       --raw-root $SSAA_RAW_EPS --pattern annotation_subagent_v3.json --out /tmp/a_$SSAA_WORKER.csv
    ```
    Every row must have `gate_ok=True`, `bounds_ok=True`, empty `gate_issues`,
@@ -83,7 +83,7 @@ Repeat:
   `ssh bitahub 'cd /localdisk-tmp/ssaa && python3 coord.py release --older-than 3600'`.
 
 ## Kickoff prompt (paste into a blank Claude session)
-> Read `policy/lap/scripts/ssaa/AUTO_ANNOTATE.md` and run the autonomous
+> Read `<WORKSPACE>/lap/scripts/ssaa/AUTO_ANNOTATE.md` and run the autonomous
 > annotation loop for SSAA-v3. Use worker id `auto-1`. Start a monitor that
 > checks the server for hinted episodes; whenever any exist, pull → annotate
 > (one Sonnet subagent per episode, up to 50 in parallel) → validate with

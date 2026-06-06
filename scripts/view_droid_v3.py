@@ -1192,6 +1192,89 @@ def _strip_think(s: str) -> str:
 
 
 # ───────────────────────────────────────────────────────────────────────────
+# Optional vision-LLM hint completion (provider-agnostic, stdlib only)
+# ───────────────────────────────────────────────────────────────────────────
+
+_HINT_SYS = (
+    "You help a human write a SHORT annotation hint for ONE robot-arm "
+    "manipulation episode (training metadata). In 1-3 concise sentences state: "
+    "what the task actually is (objects + goal); for a FAILURE, where and why it "
+    "fails; and any perception traps (occlusions, look-alike objects). The "
+    "dataset's task label is often wrong — trust the images. Continue and refine "
+    "the human's draft into a finished hint. Output ONLY the hint text.")
+
+
+def _jpeg_b64(img) -> str:
+    import io, base64
+    from PIL import Image
+    if img is None:
+        raise ValueError("no frame image")
+    buf = io.BytesIO()
+    Image.fromarray(img).save(buf, format="JPEG", quality=80)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _http_post_json(url: str, body: dict, headers: dict, timeout: int = 40) -> dict:
+    import urllib.request
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def llm_complete_hint(draft: str, task: str, outcome: str, imgs_b64: list) -> str:
+    """Ask a fast vision LLM to finish the hint, grounded on the current frame(s).
+    Configured by env: SSAA_LLM_PROVIDER (anthropic|openai; auto-detected from
+    keys), SSAA_LLM_MODEL, SSAA_LLM_BASE_URL, SSAA_LLM_KEY (else ANTHROPIC_API_KEY
+    / OPENAI_API_KEY). Works with a local Ollama (OpenAI-compatible) too."""
+    prov = os.environ.get("SSAA_LLM_PROVIDER")
+    if not prov:
+        if os.environ.get("SSAA_LLM_BASE_URL"):
+            prov = "openai"
+        elif os.environ.get("ANTHROPIC_API_KEY"):
+            prov = "anthropic"
+        elif os.environ.get("OPENAI_API_KEY"):
+            prov = "openai"
+    if not prov:
+        raise RuntimeError("LLM not configured — set ANTHROPIC_API_KEY or "
+                           "OPENAI_API_KEY (or SSAA_LLM_BASE_URL for a local model)")
+    user = (f"Task label (often wrong): {task or 'unknown'}. Outcome: {outcome}. "
+            f'Human draft so far: "{(draft or "").strip()}".\n'
+            "Look at the current frame(s) and finish the hint.")
+    key = os.environ.get("SSAA_LLM_KEY")
+    # generous budget: reasoning models (e.g. mimo) spend tokens on a thinking block
+    mx = int(os.environ.get("SSAA_LLM_MAX_TOKENS", "600"))
+    if prov == "anthropic":
+        model = os.environ.get("SSAA_LLM_MODEL", "claude-haiku-4-5-20251001")
+        base = os.environ.get("SSAA_LLM_BASE_URL", "https://api.anthropic.com").rstrip("/")
+        content = [{"type": "image", "source": {"type": "base64",
+                    "media_type": "image/jpeg", "data": b}} for b in imgs_b64]
+        content.append({"type": "text", "text": user})
+        body = {"model": model, "max_tokens": mx, "temperature": 0.4,
+                "system": _HINT_SYS, "messages": [{"role": "user", "content": content}]}
+        headers = {"x-api-key": key or os.environ["ANTHROPIC_API_KEY"],
+                   "anthropic-version": "2023-06-01", "content-type": "application/json"}
+        data = _http_post_json(base + "/v1/messages", body, headers)
+        # join text blocks; skip any `thinking` blocks reasoning models emit
+        txt = "".join(c.get("text", "") for c in data.get("content", [])
+                      if c.get("type") == "text")
+        return txt.strip()
+    # openai-compatible
+    model = os.environ.get("SSAA_LLM_MODEL", "gpt-4o-mini")
+    base = os.environ.get("SSAA_LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    content = [{"type": "text", "text": user}]
+    content += [{"type": "image_url",
+                 "image_url": {"url": "data:image/jpeg;base64," + b}} for b in imgs_b64]
+    body = {"model": model, "max_tokens": mx, "temperature": 0.4,
+            "messages": [{"role": "system", "content": _HINT_SYS},
+                         {"role": "user", "content": content}]}
+    headers = {"Authorization": f"Bearer {key or os.environ.get('OPENAI_API_KEY', '')}",
+               "content-type": "application/json"}
+    data = _http_post_json(base + "/chat/completions", body, headers)
+    return data["choices"][0]["message"]["content"].strip()
+
+
+# ───────────────────────────────────────────────────────────────────────────
 # Gradio UI
 # ───────────────────────────────────────────────────────────────────────────
 
@@ -1271,6 +1354,7 @@ def build_ui(episodes: list[V3Episode], port: int,
                 )
                 with gr.Row():
                     hint_save = gr.Button("💾 Save hint", variant="primary", scale=0)
+                    hint_complete = gr.Button("✨ Complete (LLM)", scale=0)
                     hint_status = gr.Markdown("")
 
         with gr.Row():
@@ -1365,6 +1449,29 @@ def build_ui(episodes: list[V3Episode], port: int,
 
             hint_save.click(_save_hint, inputs=[ep_dropdown, hint_box],
                             outputs=[hint_status])
+
+            def _complete_hint(short_id, frame_idx, draft):
+                ep = _resolve_ep(short_id)
+                fi = int(frame_idx)
+                imgs = []
+                for view in ("ext", "wrist"):
+                    im = get_frame_image(ep, fi, view, video_cache)
+                    if im is not None:
+                        try:
+                            imgs.append(_jpeg_b64(im))
+                        except Exception:
+                            pass
+                if not imgs:
+                    return gr.update(), "⚠️ no frame image to send"
+                try:
+                    txt = llm_complete_hint(draft, ep.task_instruction, ep.outcome, imgs)
+                    return txt, "✨ suggestion ready — edit if needed, then 💾 Save"
+                except Exception as e:
+                    return gr.update(), f"⚠️ completion failed: {e}"
+
+            hint_complete.click(_complete_hint,
+                                inputs=[ep_dropdown, slider, hint_box],
+                                outputs=[hint_box, hint_status])
 
         def _on_slider(short_id, frame_idx, overlay):
             ep = _resolve_ep(short_id)

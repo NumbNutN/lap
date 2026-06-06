@@ -35,13 +35,36 @@ In the viewer (http://localhost:7864):
    - perception traps (occlusion stretches, look-alike objects, the yellow
      sensor block on the gripper, …). Frame numbers are fine — they're stripped
      from the trained annotation later.
-3. Click **💾 Save hint** (writes to `hints.md`). Repeat for each episode; leave
+3. (Optional) Type a few words then click **✨ Complete (LLM)** — a fast vision
+   model reads the **current slider frame** (ext + wrist) plus your draft and
+   fills in a finished hint, which you can edit. Saves repetitive typing.
+4. Click **💾 Save hint** (writes to `hints.md`). Repeat for each episode; leave
    one blank to skip it.
 4. When done, **Ctrl-C** the viewer and run `hint-round` again — it pushes what
    you just wrote and pulls the next 10.
 
 That's the whole loop: `hint-round` → write + save in the viewer → Ctrl-C →
 `hint-round` → …
+
+## Enabling ✨ Complete (vision-LLM hint completion)
+Off by default. Configure one endpoint via env before launching `hint-round`
+(the viewer inherits the env). Provider auto-detects from the keys:
+```
+# Anthropic Haiku (fast, multimodal):
+export ANTHROPIC_API_KEY=sk-ant-...
+# or any OpenAI-compatible endpoint:
+export OPENAI_API_KEY=sk-...                 # default model gpt-4o-mini
+# or a LOCAL model via Ollama (no API cost), needs a vision model pulled:
+export SSAA_LLM_BASE_URL=http://localhost:11434/v1 SSAA_LLM_MODEL=llava SSAA_LLM_KEY=ollama
+# or MiMo (Anthropic-compatible, multimodal reasoning model):
+export SSAA_LLM_PROVIDER=anthropic SSAA_LLM_MODEL=mimo-v2.5 \
+       SSAA_LLM_BASE_URL=https://token-plan-sgp.xiaomimimo.com/anthropic \
+       SSAA_LLM_KEY=<your-mimo-token>
+```
+Reasoning models (mimo) spend tokens on an internal thinking block; bump
+`SSAA_LLM_MAX_TOKENS` (default 600) if completions come back truncated.
+Optional overrides: `SSAA_LLM_PROVIDER` (anthropic|openai), `SSAA_LLM_MODEL`,
+`SSAA_LLM_KEY`. With nothing set, the button just reports "LLM not configured".
 
 ## Connection
 If the first command errors, the SSH master dropped — re-open it (ask Claude, or

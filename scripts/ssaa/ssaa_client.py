@@ -19,7 +19,7 @@ Paths: raw mirror = ~/datasets/droid_raw/1.0.1 (DROID_RAW_ROOT for tools);
        working set = policy/lap/local_data/raw_eps_remote/ (+ hints.md).
 """
 from __future__ import annotations
-import argparse, json, os, re, subprocess, sys, tempfile
+import argparse, json, os, re, subprocess, sys, tempfile, time
 
 # lap repo root = three levels up from this file (lap/scripts/ssaa/ssaa_client.py),
 # so paths work whether lap is a standalone clone or vendored at RoboTwin/policy/lap.
@@ -358,23 +358,50 @@ def cmd_import_local_10(args):
     print(f"imported {len(payload)} eps ({len(ann_map)} with annotations)")
 
 
+def _ep_date(r: dict) -> str:
+    """Episode date 'YYYY-MM-DD' parsed from rel (LAB/outcome/DATE/TIME)."""
+    parts = r.get("rel", "").split("/")
+    return parts[2] if len(parts) > 2 else ""
+
+
 def cmd_pull_annot(args):
-    """Pull annotated episodes FROM the server into the review dir for human QA.
-    Re-extracts images from the shared mirror and drops the server's annotation
-    + hint on top, so it works for ANY annotator's work (not just this machine's)."""
+    """Pull ANNOTATED episodes from the server into a FRESH review subfolder for
+    human QA, then open the viewer. Works for ANY annotator's work. Filters
+    combine (AND): --uuid (substring match on the sanitized uuid; repeatable),
+    --outcome, --lab, --after / --before (YYYY-MM-DD on the episode date),
+    --limit. No filter = all annotated."""
     rows = json.loads(coord(["list", "--status", "annotated", "--limit", "100000"]))
     if args.outcome:
         rows = [r for r in rows if r["outcome"] == args.outcome]
+    if args.lab:
+        rows = [r for r in rows if args.lab.lower() in (r.get("lab", "") + r["rel"]).lower()]
+    if args.after:
+        rows = [r for r in rows if _ep_date(r) >= args.after]
+    if args.before:
+        rows = [r for r in rows if _ep_date(r) <= args.before]
     if args.uuid:
-        want = set(args.uuid)
-        rows = [r for r in rows if r["uuid"] in want]
+        pats = [_sanitize(p) for p in args.uuid]
+        matched, unmatched = [], set(pats)
+        for r in rows:
+            key = _sanitize(r["uuid"])
+            hit = next((p for p in pats if p in key), None)
+            if hit:
+                matched.append(r)
+                unmatched.discard(hit)
+        for p in sorted(unmatched):
+            print(f"  [not annotated / no match] {p}")
+        rows = matched
+    if args.limit:
+        rows = rows[:args.limit]
     if not rows:
-        sys.exit("no annotated episodes match")
+        sys.exit("no annotated episodes match the criteria")
+    label = args.name or ("review_" + time.strftime("%Y%m%d_%H%M%S"))
+    dest = os.path.join(REVIEW, label)
     eps = [{"uuid": r["uuid"], "rel": r["rel"], "outcome": r["outcome"],
             "task": r.get("task", ""), "hint": r.get("hint")} for r in rows]
-    print(f"pulling {len(eps)} annotated eps for review → {REVIEW}")
-    done = _extract_batch(eps, dest=REVIEW)
-    _seed_hints_md(done, with_hint=True, dest=REVIEW)
+    print(f"pulling {len(eps)} annotated ep(s) → {dest}")
+    done = _extract_batch(eps, dest=dest)
+    _seed_hints_md(done, with_hint=True, dest=dest)
     got = 0
     for e, t in done:
         rdir = f"{REMOTE_ANNOT}/{e['uuid']}"
@@ -388,21 +415,33 @@ def cmd_pull_annot(args):
             got += 1
         print(f"   {os.path.basename(t)}  [{e['outcome']}]"
               f"{'' if ann.returncode == 0 else '  [no annotation on server]'}")
-    print(f"\npulled {got}/{len(done)} annotations. Review:\n"
-          f"  cd {SCRIPTS} && {VENV_PY} view_droid_v3.py "
-          f"--images-dir {REVIEW} --suffix subagent_v3 "
-          f"--hints {REVIEW}/hints.md --load-video --port 7864")
+    print(f"\npulled {got}/{len(done)} annotations → {dest}")
+    viewer = [VENV_PY, f"{SCRIPTS}/view_droid_v3.py", "--images-dir", dest,
+              "--suffix", "subagent_v3", "--hints", f"{dest}/hints.md",
+              "--load-video", "--port", str(args.port)]
+    if args.no_viewer:
+        print("  viewer:\n   " + " ".join(viewer))
+        return
+    print(f"\n→ opening viewer at http://localhost:{args.port}  (Ctrl-C to close)")
+    subprocess.run(viewer)
+
+
+def _local_roots():
+    """Working dirs that hold ep subdirs: raw_eps* + each review_* subfolder."""
+    import glob as _g
+    return sorted(set(_g.glob(f"{LOCAL_DATA}/raw_eps*") + _g.glob(f"{REVIEW}/*")))
 
 
 def _scan_local_eps():
-    """uuid -> [(dir_label, has_annotation), ...] across all local working dirs."""
+    """uuid -> [(dir_label, has_annotation, is_review), ...] across local dirs."""
     import glob as _g
+    review_abs = os.path.abspath(REVIEW) + os.sep
     seen: dict[str, list] = {}
-    roots = sorted(set(_g.glob(f"{LOCAL_DATA}/raw_eps*") + [REVIEW]))
-    for d in roots:
+    for d in _local_roots():
         if not os.path.isdir(d):
             continue
-        label = os.path.basename(d)
+        label = os.path.relpath(d, LOCAL_DATA)
+        is_review = os.path.abspath(d).startswith(review_abs)
         for mp in _g.glob(f"{d}/*/meta.json"):
             epd = os.path.dirname(mp)
             try:
@@ -412,7 +451,7 @@ def _scan_local_eps():
             if not uuid:
                 continue
             has_ann = os.path.exists(os.path.join(epd, "annotation_subagent_v3.json"))
-            seen.setdefault(uuid, []).append((label, has_ann))
+            seen.setdefault(uuid, []).append((label, has_ann, is_review))
     return seen
 
 
@@ -425,8 +464,8 @@ def cmd_local_status(args):
     for uuid, places in local.items():
         srv = rows.get(uuid, {})
         sstat = srv.get("status", "unknown")
-        has_local_ann = any(a for _, a in places)
-        in_review = any(lbl == os.path.basename(REVIEW) for lbl, _ in places)
+        has_local_ann = any(a for _, a, _ in places)
+        in_review = any(rv for _, _, rv in places)
         if in_review:
             state = "pulled_for_review"            # 从云端拉取，人工检查
         elif has_local_ann and sstat == "annotated":
@@ -439,7 +478,7 @@ def cmd_local_status(args):
             state = "awaiting_hint"                # 认领，等待提示
         else:
             state = sstat
-        dirs = ",".join(sorted({lbl for lbl, _ in places}))
+        dirs = ",".join(sorted({lbl for lbl, _, _ in places}))
         buckets.setdefault(state, []).append((uuid, srv.get("outcome", "?"), dirs))
     order = ["awaiting_hint", "hinted_submitted", "annotated_local_unpushed",
              "annotated_pushed", "pulled_for_review"]
@@ -480,13 +519,13 @@ def cmd_prune(args):
       - annot workspace (raw_eps_<worker>): safe once server marks it annotated.
       - review dir: only with --review (after you've QA'd it)."""
     rows = {r["uuid"]: r for r in json.loads(coord(["list", "--limit", "100000"]))}
-    review_label = os.path.basename(REVIEW)
+    review_abs = os.path.abspath(REVIEW) + os.sep
     candidates = []   # (path, uuid, reason)
     import glob as _g
-    for d in sorted(set(_g.glob(f"{LOCAL_DATA}/raw_eps*") + [REVIEW])):
+    for d in _local_roots():
         if not os.path.isdir(d):
             continue
-        label = os.path.basename(d)
+        is_review = os.path.abspath(d).startswith(review_abs)
         for mp in _g.glob(f"{d}/*/meta.json"):
             epd = os.path.dirname(mp)
             try:
@@ -496,7 +535,7 @@ def cmd_prune(args):
             srv = rows.get(uuid, {})
             sstat = srv.get("status", "")
             has_ann = os.path.exists(os.path.join(epd, "annotation_subagent_v3.json"))
-            if label == review_label:
+            if is_review:
                 if args.review:
                     candidates.append((epd, uuid, "reviewed (re-pull with pull-annot)"))
             elif has_ann:
@@ -537,8 +576,17 @@ def main():
     p.add_argument("--outcome", choices=["success", "failure"])
     p.set_defaults(fn=cmd_claim_annot)
     sub.add_parser("push-annot").set_defaults(fn=cmd_push_annot)
-    p = sub.add_parser("pull-annot"); p.add_argument("--uuid", nargs="*")
-    p.add_argument("--outcome", choices=["success", "failure"]); p.set_defaults(fn=cmd_pull_annot)
+    p = sub.add_parser("pull-annot")
+    p.add_argument("--uuid", nargs="*", help="substring match on the sanitized uuid (repeatable)")
+    p.add_argument("--outcome", choices=["success", "failure"])
+    p.add_argument("--lab", help="filter by lab / rel substring (e.g. TRI, AUTOLab)")
+    p.add_argument("--after", help="episode date >= YYYY-MM-DD")
+    p.add_argument("--before", help="episode date <= YYYY-MM-DD")
+    p.add_argument("--limit", type=int)
+    p.add_argument("--name", help="review subfolder name (default review_<timestamp>)")
+    p.add_argument("--port", type=int, default=7870, help="viewer port (default 7870, ≠ hint-round 7864)")
+    p.add_argument("--no-viewer", action="store_true")
+    p.set_defaults(fn=cmd_pull_annot)
     sub.add_parser("local-status").set_defaults(fn=cmd_local_status)
     p = sub.add_parser("backup"); p.add_argument("--dir"); p.set_defaults(fn=cmd_backup)
     p = sub.add_parser("prune"); p.add_argument("--yes", action="store_true")

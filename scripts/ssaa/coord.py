@@ -227,7 +227,10 @@ def cmd_release(args):
 
 def cmd_list(args):
     with _Locked(write=False) as st:
-        out = [{"uuid": u, "rel": r["rel"], "outcome": r["outcome"]}
+        out = [{"uuid": u, "rel": r["rel"], "outcome": r["outcome"],
+                "status": r["status"], "task": r.get("task", ""),
+                "hint": r.get("hint"), "annotated": r.get("annotated", False),
+                "claimed_by": r.get("claimed_by")}
                for u, r in st["episodes"].items()
                if (not args.status or r["status"] == args.status)]
         print(json.dumps(out[:args.limit]))

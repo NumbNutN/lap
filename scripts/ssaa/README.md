@@ -59,6 +59,9 @@ Run with the venv python: `policy/lap/.venv/bin/python3 ssaa_client.py <cmd>`.
 | `push-hints` | parse `raw_eps_remote/hints.md`, push filled hints to server (status→hinted) |
 | `claim-annot --n K` | claim K *hinted, un-annotated* eps → rsync + extract + write their hints into `hints.md` |
 | `push-annot` | scp every local `annotation_subagent_v3.json` (+ audit) to the server, mark annotated |
+| `pull-annot [--uuid U…] [--outcome …]` | pull **annotated** eps *from* the server into `ssaa_review/` (re-extract images + drop server annotation + hint) — for human QA of **anyone's** work |
+| `local-status` | every local ep with its lifecycle state + which dirs hold it |
+| `prune [--yes] [--review]` | delete local ep dirs whose content is confirmed on the server (re-pullable); dry-run without `--yes` |
 | `import-local-10` | seed the server with the original 10 eps (matched by path) |
 
 Working set: `policy/lap/local_data/raw_eps_remote/` (ep dirs named by uuid +
@@ -106,6 +109,32 @@ policy/lap/.venv/bin/python3 policy/lap/scripts/data_pipeline/audit_v3.py \
 Require: `gate_ok`, `bounds_ok` True; `gate_issues` empty; 0 leakage / S_pred-echo
 / foreshadow / raw-gripper. Then `ssaa_client.py push-annot`. Both the local
 jsonl and the server copy (`/localdisk-tmp/ssaa/annotations/<uuid>/`) are kept.
+
+## 3b. Review & local data lifecycle
+**The server is the source of truth; local dirs are prunable scratch.** Each of
+the four working states maps to one canonical dir, and once its content is on
+the server the local copy is redundant (re-pullable on demand):
+
+| state | local dir | filled by | redundant after |
+|---|---|---|---|
+| awaiting hint | `raw_eps_remote/` | `claim-hint` | `push-hints` |
+| hinted (submitted) | *(server only)* | — | — |
+| annotated | `raw_eps_<worker>/` | `claim-annot` | `push-annot` |
+| pulled for review | `ssaa_review/` | `pull-annot` | QA sign-off |
+
+To review annotations (yours or another worker's), pull them fresh from the
+server and open the viewer:
+```
+ssaa_client.py pull-annot                 # all annotated → ssaa_review/
+ssaa_client.py pull-annot --outcome failure   # or a subset
+cd policy/lap/scripts && ../.venv/bin/python3 view_droid_v3.py \
+   --images-dir ../local_data/ssaa_review --suffix subagent_v3 \
+   --hints ../local_data/ssaa_review/hints.md --load-video --port 7864
+```
+`local-status` shows where everything sits; `prune` (dry-run first) reclaims the
+scratch copies whose content the server already has. Re-pull anytime with
+`pull-annot`. Multi-worker note: give each annotation worker a unique
+`SSAA_WORKER` **and** its own `SSAA_RAW_EPS=<dir>` so claims never collide.
 
 ## 4. Server coordinator (`coord.py`, on the pod at `/localdisk-tmp/ssaa/`)
 Stdlib only; `state.json` (flock-guarded) is the single source of truth.

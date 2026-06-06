@@ -425,8 +425,9 @@ def load_v3_episodes(images_dir: str, suffix: str,
     hints = parse_hints_md(hints_path) if hints_path else {}
     if hints:
         logger.info("hints: %d entries from %s", len(hints), hints_path)
-    ep_dirs = sorted(p for p in glob.glob(os.path.join(images_dir, "ep*"))
-                     if os.path.isdir(p))
+    ep_dirs = sorted(p for p in glob.glob(os.path.join(images_dir, "*"))
+                     if os.path.isdir(p)
+                     and os.path.exists(os.path.join(p, "meta.json")))
     out: list[V3Episode] = []
     for ep_dir in ep_dirs:
         if max_episodes is not None and len(out) >= max_episodes:

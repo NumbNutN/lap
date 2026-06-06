@@ -122,7 +122,8 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         else:
             #   (1) A_correct present iff imitation_supervised == false
             #   (2) <think> in A only when supervised (a failure's A stays plain)
-            #   (3) the FIRST acting keyframe's A leads with the Plan <think>
+            #   (3) the FIRST acting keyframe carries the Plan <think> in its
+            #       policy-target field (A when supervised, A_correct when not)
             if bool(corr_txt.strip()) != (imit_g is False):
                 gate_issues.append(
                     f"kf{i}:A_correct={'set' if corr_txt.strip() else 'null'}!=imit{imit_g}")
@@ -130,7 +131,8 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
                 gate_issues.append(f"kf{i}:think-in-A-on-failure")
             if not first_acting_seen:
                 first_acting_seen = True
-                if "<think>" not in a_txt:
+                target = corr_txt if imit_g is False else a_txt
+                if "<think>" not in target:
                     gate_issues.append(f"kf{i}:first-move-no-plan-think")
             # S_pred should not echo A's cm/° (only on acting kfs)
             sp_nums = set(re.findall(r"\d+\s*cm|\d+\s*°", str(kf.get("S_pred") or "")))
@@ -217,8 +219,9 @@ def main():
     ap.add_argument("--out", required=True, help="CSV output path")
     args = ap.parse_args()
 
-    ep_dirs = sorted(d for d in glob.glob(f"{args.raw_root}/ep*")
-                     if os.path.isdir(d))
+    # any subdir that holds a meta.json is an episode dir (ep000… or uuid-named)
+    ep_dirs = sorted(d for d in glob.glob(f"{args.raw_root}/*")
+                     if os.path.isdir(d) and os.path.exists(os.path.join(d, "meta.json")))
     print(f"Scanning {len(ep_dirs)} episode dirs for {args.pattern!r}")
 
     rows: list[dict] = []

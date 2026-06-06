@@ -38,14 +38,17 @@ In the viewer (http://localhost:7864):
 3. (Optional) Type a few words then click **✨ Complete (LLM)** — a fast vision
    model reads the **current slider frame** (ext + wrist) plus your draft and
    fills in a finished hint, which you can edit. Saves repetitive typing.
-4. Click **💾 Save hint** (writes to `hints.md`). Repeat for each episode; leave
-   one blank to skip it.
-   - **✓ Default hint** — for a trivially simple ep, one click fills a generic
-     hint (then Save) so it's claimable without typing.
+4. **Finish the episode** with ONE of three buttons — each stores the ep and
+   **auto-advances to the next not-yet-stored episode**:
+   - **💾 Save hint** — store what you wrote.
+   - **✓ Default hint** — overwrite the box with a generic hint and store (for
+     trivially simple eps; no typing).
    - **🚫 Mark unusable** — for an ep that can't be annotated (no clear task,
-     aimless, etc.): tags it, and `push-hints` then runs `exclude` on the
-     server so it's never claimed again (and is dropped on export). Undo with
+     aimless, etc.): tags it; `push-hints` then runs `exclude` on the server so
+     it's never claimed again (dropped on export). Undo:
      `ssaa_client.py exclude --uuid <key> --undo`.
+   (**✨ Complete** only drafts text — you still Save.) When every ep is stored
+   it says so; then run `push-hints`.
 4. When done, **Ctrl-C** the viewer and run `hint-round` again — it pushes what
    you just wrote and pulls the next 10.
 

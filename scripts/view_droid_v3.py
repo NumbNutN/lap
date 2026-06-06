@@ -1449,9 +1449,6 @@ def build_ui(episodes: list[V3Episode], port: int,
                 except Exception as e:
                     return f"⚠️ save failed: {e}"
 
-            hint_save.click(_save_hint, inputs=[ep_dropdown, hint_box],
-                            outputs=[hint_status])
-
             def _complete_hint(short_id, frame_idx, draft):
                 ep = _resolve_ep(short_id)
                 fi = int(frame_idx)
@@ -1476,29 +1473,79 @@ def build_ui(episodes: list[V3Episode], port: int,
                                 outputs=[hint_box, hint_status])
 
             def _default_hint(short_id, draft):
+                # Unconditionally OVERWRITE the box with a generic hint and save.
                 ep = _resolve_ep(short_id)
-                if (draft or "").strip():
-                    return gr.update(), "box already has text — just 💾 Save it"
                 task = (ep.task_instruction or "").strip() or "simple task"
                 txt = (f"Routine/clear task: {task}. "
                        "Annotate exactly what the images show.")
                 save_hint_to_md(hints_path, os.path.basename(ep.ep_dir.rstrip("/")), txt)
                 ep.hint = txt
-                return txt, "✓ default hint filled & saved — claimable for annotation"
+                return txt, "✓ default hint saved"
 
             def _exclude_ep(short_id, draft):
+                # Confirm this episode is unusable (tagged, excluded on push).
                 ep = _resolve_ep(short_id)
                 txt = (draft or "").strip()
                 if not txt.startswith("[[EXCLUDE]]"):
                     txt = ("[[EXCLUDE]] " + txt).strip()
                 save_hint_to_md(hints_path, os.path.basename(ep.ep_dir.rstrip("/")), txt)
                 ep.hint = txt
-                return txt, "🚫 marked unusable — runs `exclude` on next push-hints"
+                return txt, "🚫 marked unusable"
 
+            # ── finish current ep → jump to the next not-yet-stored one ──────
+            def _goto(short_id, overlay, status=""):
+                ep = _resolve_ep(short_id)
+                s0 = ep.keyframes[0].frame_idx if ep.keyframes else 0
+                anc = current_anchor_idx(ep, s0)
+                vid, vid_md = _ep_video(ep, "ext")
+                return [
+                    gr.update(value=ep.short_id),
+                    gr.update(minimum=0, maximum=max(1, ep.n_frames - 1), value=s0),
+                    _meta_md(ep),
+                    get_frame_image(ep, s0, "ext", video_cache,
+                                    overlay=overlay, anchor_kf=_anchor_kf(ep, s0)),
+                    get_frame_image(ep, s0, "wrist", video_cache),
+                    _anchor_md(ep, anc, s0),
+                    render_phase_ribbon(ep, s0),
+                    _audit_md(ep),
+                    _kf_table(ep),
+                    vid, vid_md,
+                    gr.update(value="ext"),
+                    ep.hint,
+                    f"This episode is a {_outcome_chip_html(ep.outcome)}",
+                    status,
+                ]
+
+            def _next_unfinished(cur):
+                choices = list(by_short.keys())
+                stored = parse_hints_md(hints_path) if hints_path else {}
+                def done(s):
+                    return os.path.basename(by_short[s].ep_dir.rstrip("/")) in stored
+                order = (choices[choices.index(cur) + 1:] + choices[:choices.index(cur) + 1]
+                         if cur in choices else choices)
+                return next((s for s in order if not done(s)), None)
+
+            def _finish(cur, overlay):
+                nxt = _next_unfinished(cur)
+                if nxt is None:
+                    return _goto(cur, overlay, "✓ every episode now has a hint / tag")
+                return _goto(nxt, overlay, "→ next unfinished episode")
+
+            FULL_OUT = [ep_dropdown, slider, meta_panel, ext_img, wrist_img,
+                        anchor_panel, ribbon_plot, audit_panel, table,
+                        raw_video, raw_video_links, cam_radio, hint_box,
+                        hint_outcome, hint_status]
+
+            # save / default / mark-unusable all = "this ep is finished" → advance
+            hint_save.click(_save_hint, inputs=[ep_dropdown, hint_box],
+                            outputs=[hint_status]).then(
+                _finish, inputs=[ep_dropdown, overlay_chk], outputs=FULL_OUT)
             hint_default.click(_default_hint, inputs=[ep_dropdown, hint_box],
-                               outputs=[hint_box, hint_status])
+                               outputs=[hint_box, hint_status]).then(
+                _finish, inputs=[ep_dropdown, overlay_chk], outputs=FULL_OUT)
             hint_exclude.click(_exclude_ep, inputs=[ep_dropdown, hint_box],
-                               outputs=[hint_box, hint_status])
+                               outputs=[hint_box, hint_status]).then(
+                _finish, inputs=[ep_dropdown, overlay_chk], outputs=FULL_OUT)
 
         def _on_slider(short_id, frame_idx, overlay):
             ep = _resolve_ep(short_id)

@@ -55,12 +55,13 @@ Run with the venv python: `policy/lap/.venv/bin/python3 ssaa_client.py <cmd>`.
 | command | what it does |
 |---|---|
 | `stats` | server counts: total / available / hinted / annotated, by outcome |
-| `claim-hint --n K [--outcome success\|failure]` | claim K *unhinted* eps → rsync raw + extract → `raw_eps_remote/<uuid>/`; seed `hints.md` with each `task` |
+| `claim-hint --n K [--outcome …] [--no-prune]` | first **auto-prune** already-submitted eps from the workspace, then claim K *unhinted* eps → rsync raw + extract → `raw_eps_remote/<uuid>/`; seed `hints.md` with each `task`. (`--n 0` = prune only.) |
 | `push-hints` | parse `raw_eps_remote/hints.md`, push filled hints to server (status→hinted) |
 | `claim-annot --n K` | claim K *hinted, un-annotated* eps → rsync + extract + write their hints into `hints.md` |
 | `push-annot` | scp every local `annotation_subagent_v3.json` (+ audit) to the server, mark annotated |
 | `pull-annot [--uuid U…] [--outcome …]` | pull **annotated** eps *from* the server into `ssaa_review/` (re-extract images + drop server annotation + hint) — for human QA of **anyone's** work |
 | `local-status` | every local ep with its lifecycle state + which dirs hold it |
+| `backup [--dir D]` | read-only mirror of **all** server annotations + hints + state.json → `ssaa_backup/` (remote isn't durable; never deletes locally) |
 | `prune [--yes] [--review]` | delete local ep dirs whose content is confirmed on the server (re-pullable); dry-run without `--yes` |
 | `import-local-10` | seed the server with the original 10 eps (matched by path) |
 
@@ -133,8 +134,13 @@ cd policy/lap/scripts && ../.venv/bin/python3 view_droid_v3.py \
 ```
 `local-status` shows where everything sits; `prune` (dry-run first) reclaims the
 scratch copies whose content the server already has. Re-pull anytime with
-`pull-annot`. Multi-worker note: give each annotation worker a unique
+`pull-annot`. Run `backup` regularly — it's your only durable copy if the remote
+store is wiped. Multi-worker note: give each annotation worker a unique
 `SSAA_WORKER` **and** its own `SSAA_RAW_EPS=<dir>` so claims never collide.
+
+**Companion docs:** `HINTING.md` (human hint pass), `ANNOTATING.md` (one-shot
+context-free annotation), `AUTO_ANNOTATE.md` (autonomous monitor loop — watch for
+hinted eps, pull→annotate→push on its own, ≤50 parallel per batch).
 
 ## 4. Server coordinator (`coord.py`, on the pod at `/localdisk-tmp/ssaa/`)
 Stdlib only; `state.json` (flock-guarded) is the single source of truth.

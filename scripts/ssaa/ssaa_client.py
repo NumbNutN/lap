@@ -140,7 +140,35 @@ def _seed_hints_md(done, with_hint: bool, dest: str | None = None):
             f.write("".join(add))
 
 
+def _auto_prune(workspace_dir: str, rows: dict) -> int:
+    """Remove ep dirs in `workspace_dir` whose content is already on the server
+    (hint submitted, or annotation pushed) — they're redundant scratch."""
+    import glob as _g
+    removed = 0
+    for mp in _g.glob(f"{workspace_dir}/*/meta.json"):
+        epd = os.path.dirname(mp)
+        try:
+            uuid = json.load(open(mp)).get("uuid")
+        except Exception:
+            continue
+        srv = rows.get(uuid, {})
+        sstat = srv.get("status", "")
+        has_ann = os.path.exists(os.path.join(epd, "annotation_subagent_v3.json"))
+        safe = (has_ann and sstat == "annotated") or \
+               (not has_ann and (sstat in ("hinted", "annot_claimed", "annotated")
+                                  or srv.get("hint")))
+        if safe:
+            subprocess.run(["rm", "-rf", epd])
+            removed += 1
+    return removed
+
+
 def cmd_claim_hint(args):
+    if not args.no_prune:        # clear already-submitted eps before pulling new
+        rows = {r["uuid"]: r for r in json.loads(coord(["list", "--limit", "100000"]))}
+        n = _auto_prune(RAW_EPS, rows)
+        if n:
+            print(f"pruned {n} already-submitted ep(s) from {os.path.basename(RAW_EPS)}")
     a = ["claim", "--role", "hint", "--n", str(args.n), "--worker", args.worker]
     if args.outcome:
         a += ["--outcome", args.outcome]
@@ -353,6 +381,27 @@ def cmd_local_status(args):
     print()
 
 
+def cmd_backup(args):
+    """Read-only: mirror ALL server annotations + hints + state.json to a local
+    backup (remote storage may not be durable). Never deletes locally — the
+    backup only accumulates, so episodes dropped on the server survive here."""
+    dest = args.dir or f"{LOCAL_DATA}/ssaa_backup"
+    os.makedirs(dest, exist_ok=True)
+    for sub in ("annotations", "hints"):
+        os.makedirs(f"{dest}/{sub}", exist_ok=True)
+        r = subprocess.run(["rsync", "-a", "--info=stats0", "-e", "ssh",
+                            f"{SSH}:{REMOTE_SSAA}/{sub}/", f"{dest}/{sub}/"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"   [rsync {sub} fail] {r.stderr.strip()[:160]}")
+    subprocess.run(["scp", "-q", f"{SSH}:{REMOTE_STATE}", f"{dest}/state.json"],
+                   capture_output=True, text=True)
+    import glob as _g
+    n_ann = len(_g.glob(f"{dest}/annotations/*/annotation_subagent_v3.json"))
+    n_hint = len(_g.glob(f"{dest}/hints/*.txt"))
+    print(f"backup → {dest}\n   {n_ann} annotations, {n_hint} hints, state.json mirrored")
+
+
 def cmd_prune(args):
     """Delete local ep dirs whose content is safely on the server (re-pullable).
     Dry-run by default; pass --yes to delete. The server is the source of truth.
@@ -406,6 +455,7 @@ def main():
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
     p = sub.add_parser("claim-hint"); p.add_argument("--n", type=int, default=5)
     p.add_argument("--outcome", choices=["success", "failure"]); p.add_argument("--worker", default="local")
+    p.add_argument("--no-prune", action="store_true", help="keep already-submitted eps in the workspace")
     p.set_defaults(fn=cmd_claim_hint)
     sub.add_parser("push-hints").set_defaults(fn=cmd_push_hints)
     p = sub.add_parser("claim-annot"); p.add_argument("--n", type=int, default=5); p.add_argument("--worker", default="local")
@@ -414,6 +464,7 @@ def main():
     p = sub.add_parser("pull-annot"); p.add_argument("--uuid", nargs="*")
     p.add_argument("--outcome", choices=["success", "failure"]); p.set_defaults(fn=cmd_pull_annot)
     sub.add_parser("local-status").set_defaults(fn=cmd_local_status)
+    p = sub.add_parser("backup"); p.add_argument("--dir"); p.set_defaults(fn=cmd_backup)
     p = sub.add_parser("prune"); p.add_argument("--yes", action="store_true")
     p.add_argument("--review", action="store_true", help="also prune the review dir")
     p.set_defaults(fn=cmd_prune)

@@ -26,7 +26,8 @@ when supervised, `A_correct` when not — so `<think>` lives in **one field
 per keyframe, never both**.
 
 - routine → `A`: `descend 5 cm and close` (no think)
-- deliberate (kf0 plan, precision/contact, ambiguity, risk) → `A`:
+- deliberate (kf0 plan; precision/contact; ambiguity; risk; **physical
+  effect** — a motion whose point is the consequence it produces, not the move itself) → `A`:
   `<think>handle is narrow, align first</think> descend 5 cm and close`
 - override the demo (`imit=false`) → `A`: plain demo telemetry, may note
   the consequence ("open fingers, so they clip the cup"); `A_correct`:
@@ -94,6 +95,12 @@ get_image(frame_idx, view="ext"|"wrist") -> JPEG bytes
   image axes. motion is more ituitive in wrist view because it is 
   a relative frame based on current wrist pose. Use for 
   visual-grounding descriptions.
+- **Rotation (roll/pitch/yaw)** is about each frame's (forward, left, up)
+  axes — robot base: roll banks about forward, pitch tips up/down about
+  left, yaw turns about vertical; wrist: roll spins the approach axis, pitch
+  tilts it up/down, yaw pans it. Reason from this what a rotation does to the
+  held object's attitude — which way its opening / face / long axis ends up
+  pointing.
 
 **Ground every directional/rotational claim in a named subject first.**
 State the reference frame (robot base *or* wrist view) before any
@@ -181,9 +188,11 @@ absolute "must"s — apply when relevant.
 Read from the **chunk_end image**, the way `A` is read from the pose delta.
 Describe what the chunk_end frame shows *changed* relative to `S`.
 
-- **Object-centric**: forecast object relations/states (cup now gripped /
-  inverted over the bowl / toppled), not the arm's own motion. If only the
-  arm moves with no object change, a minimal arm-state line is fine.
+- **Object-centric, task-critical**: forecast object relations/states, not
+  the arm's own motion — above all the change that drives the next decision
+  (object grasped / seated / released, contents transferred, support gained
+  or lost); that signal is why the expert proceeds or stops. If only the arm
+  moves with no object change, a minimal arm-state line is fine.
 - **No A-echo (hard rule)**: S_pred must not contain any cm/° that appears
   in this kf's `A` — repeating the motion is restating the action, not the
   outcome. S_pred is the *visible result* ("fingers now seated on the cup
@@ -217,9 +226,12 @@ clip the cup").
   **robot base** frame. When the external view is occluded but the object
   fills the wrist view (e.g. an inverted-cup pour), use the wrist frame even
   for transport — a robot-base number there is ungrounded proprioception.
-- **Affordance call-out**: when motion features alignment / obstacle
-  avoidance / contact geometry, A says so (these are facts, not
-  reasoning).
+- **Physical effect**: when a motion's purpose is the consequence it
+  produces — the attitude it puts an object in, a contact it makes or
+  avoids, a force it applies — reason it in `<think>`: what effect results
+  (so gravity/contact then does the rest) and why this axis/magnitude
+  achieves it, not just the number. Plain alignment/contact facts can stay
+  in `A`.
 - **Intent on retry**: at retry keyframes, name the intent ("re-align
   after the slip"), not just numbers.
 

@@ -185,9 +185,11 @@ def cmd_claim_hint(args):
           f"Then edit {HINTS_MD} and run: ssaa_client.py push-hints")
 
 
-def cmd_push_hints(args):
+def _push_hints() -> int:
+    """Push filled hints from RAW_EPS/hints.md to the server; return count.
+    Placeholders ((task: …)) are skipped. No exit on empty."""
     if not os.path.exists(HINTS_MD):
-        sys.exit("no hints.md")
+        return 0
     text = open(HINTS_MD).read()
     secs = re.findall(r"^##\s+(\S+)\s*\n(.*?)(?=^##\s|\Z)", text, re.M | re.S)
     payload = {}
@@ -202,8 +204,55 @@ def cmd_push_hints(args):
         if uuid:
             payload[uuid] = body
     if not payload:
-        sys.exit("no filled hints to push")
-    print(coord(["set-hint", "--stdin"], stdin=json.dumps(payload)))
+        return 0
+    coord(["set-hint", "--stdin"], stdin=json.dumps(payload))
+    return len(payload)
+
+
+def cmd_push_hints(args):
+    n = _push_hints()
+    print(json.dumps({"pushed": n}) if n else "no filled hints to push")
+
+
+def _claim_hint_batch(n: int, outcome: str | None, worker: str) -> list:
+    if n <= 0:
+        return []
+    a = ["claim", "--role", "hint", "--n", str(n), "--worker", worker]
+    if outcome:
+        a += ["--outcome", outcome]
+    done = _extract_batch(json.loads(coord(a)))
+    _seed_hints_md(done, with_hint=False)
+    return done
+
+
+def cmd_hint_round(args):
+    """One command per hinting round: submit last round's hints → prune the
+    now-submitted scratch → claim a fresh success/failure mix → open the viewer
+    (write hints in-page, 💾 Save, Ctrl-C, re-run to push + pull the next batch)."""
+    pushed = _push_hints()
+    if pushed:
+        print(f"pushed {pushed} hint(s) from last round")
+    rows = {r["uuid"]: r for r in json.loads(coord(["list", "--limit", "100000"]))}
+    pr = _auto_prune(RAW_EPS, rows)
+    if pr:
+        print(f"pruned {pr} submitted ep(s) from {os.path.basename(RAW_EPS)}")
+    done = (_claim_hint_batch(args.success, "success", args.worker) +
+            _claim_hint_batch(args.failure, "failure", args.worker))
+    print(f"claimed {len(done)} new ep(s) → {os.path.basename(RAW_EPS)}")
+    for e, t in done:
+        print(f"   {os.path.basename(t)}  [{e['outcome']}]  task: {e.get('task','')[:50]}")
+    if not done:
+        print("  (nothing new — that outcome's queue may be exhausted)")
+    if args.no_viewer:
+        print(f"\nviewer:\n  cd {SCRIPTS} && {VENV_PY} view_droid_v3.py --images-dir "
+              f"{RAW_EPS} --suffix subagent_v3 --include-unannotated --hints {HINTS_MD} "
+              f"--load-video --port {args.port}")
+        return
+    print(f"\n→ opening viewer at http://localhost:{args.port}  "
+          f"(write each hint, click 💾 Save; Ctrl-C to close, then run hint-round again)")
+    subprocess.run([VENV_PY, f"{SCRIPTS}/view_droid_v3.py", "--images-dir", RAW_EPS,
+                    "--suffix", "subagent_v3", "--include-unannotated", "--hints", HINTS_MD,
+                    "--load-video", "--port", str(args.port)])
 
 
 def cmd_claim_annot(args):
@@ -458,6 +507,10 @@ def main():
     p.add_argument("--no-prune", action="store_true", help="keep already-submitted eps in the workspace")
     p.set_defaults(fn=cmd_claim_hint)
     sub.add_parser("push-hints").set_defaults(fn=cmd_push_hints)
+    p = sub.add_parser("hint-round")
+    p.add_argument("--success", type=int, default=8); p.add_argument("--failure", type=int, default=2)
+    p.add_argument("--port", type=int, default=7864); p.add_argument("--worker", default="local")
+    p.add_argument("--no-viewer", action="store_true"); p.set_defaults(fn=cmd_hint_round)
     p = sub.add_parser("claim-annot"); p.add_argument("--n", type=int, default=5); p.add_argument("--worker", default="local")
     p.set_defaults(fn=cmd_claim_annot)
     sub.add_parser("push-annot").set_defaults(fn=cmd_push_annot)

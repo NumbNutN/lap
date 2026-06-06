@@ -199,6 +199,24 @@ def parse_hints_md(path: str) -> dict[str, str]:
     return {k: v for k, v in out.items() if v and not v.startswith("<replace with")}
 
 
+def save_hint_to_md(path: str, key: str, text: str) -> None:
+    """Upsert the `## <key>` section of hints.md with `text` (in-place).
+    Creates the file/section if absent. Other sections are left untouched."""
+    import re as _re
+    text = (text or "").strip()
+    header = f"## {key}"
+    body = f"{header}\n{text}\n"
+    existing = Path(path).read_text() if os.path.exists(path) else \
+        "# Per-episode hints for SSAA distributed annotation\n"
+    # replace the section (from its header up to the next `## ` or EOF)
+    pat = _re.compile(rf"^##\s+{_re.escape(key)}\s*\n.*?(?=^##\s|\Z)", _re.M | _re.S)
+    if pat.search(existing):
+        new = pat.sub(body, existing)
+    else:
+        new = existing.rstrip("\n") + "\n\n" + body
+    Path(path).write_text(new)
+
+
 def _fill_pose_deltas(ep: V3Episode) -> None:
     """Populate kf.pose_delta for each keyframe.
 
@@ -1164,11 +1182,13 @@ def _strip_think(s: str) -> str:
 # ───────────────────────────────────────────────────────────────────────────
 
 def build_ui(episodes: list[V3Episode], port: int,
-             video_cache: VideoCache | None = None) -> None:
+             video_cache: VideoCache | None = None,
+             hints_path: str | None = None) -> None:
     if not episodes:
         raise SystemExit("No v3 episodes loaded.")
     by_short: dict[str, V3Episode] = {ep.short_id: ep for ep in episodes}
     overlay_available = any(ep.axis_overlay for ep in episodes)
+    hint_editable = bool(hints_path)
 
     def _resolve_ep(short_id: str) -> V3Episode:
         return by_short.get(short_id, episodes[0])
@@ -1186,7 +1206,8 @@ def build_ui(episodes: list[V3Episode], port: int,
     init_table = _kf_table(init_ep)
 
     with gr.Blocks(title="SSAA-v3 viewer") as demo:
-        gr.Markdown("# SSAA-v3 annotation viewer  *(read-only)*")
+        gr.Markdown("# SSAA-v3 annotation viewer"
+                    + ("  *(hint-writing mode)*" if hint_editable else "  *(read-only)*"))
 
         with gr.Accordion("📖 What am I looking at? — schema & field meanings", open=False):
             gr.Markdown(_INTRO_MD)
@@ -1196,6 +1217,19 @@ def build_ui(episodes: list[V3Episode], port: int,
             label="episode", interactive=True,
         )
         meta_panel = gr.Markdown(_meta_md(init_ep))
+
+        if hint_editable:
+            with gr.Accordion("✍️ Write hint (saved to hints.md)", open=True):
+                hint_box = gr.Textbox(
+                    value=init_ep.hint, lines=4, label=None, show_label=False,
+                    placeholder=("What is the task (object, goal)? For a failure: "
+                                 "where/why it goes wrong. Perception traps "
+                                 "(occlusions, look-alikes). Frame numbers OK."),
+                    interactive=True,
+                )
+                with gr.Row():
+                    hint_save = gr.Button("💾 Save hint", variant="primary", scale=0)
+                    hint_status = gr.Markdown("")
 
         with gr.Row():
             with gr.Column(scale=2):
@@ -1255,6 +1289,26 @@ def build_ui(episodes: list[V3Episode], port: int,
             outputs=[slider, meta_panel, ext_img, wrist_img,
                      anchor_panel, ribbon_plot, audit_panel, table],
         )
+
+        if hint_editable:
+            def _load_hint(short_id):
+                return _resolve_ep(short_id).hint, ""
+
+            ep_dropdown.change(_load_hint, inputs=[ep_dropdown],
+                               outputs=[hint_box, hint_status])
+
+            def _save_hint(short_id, text):
+                ep = _resolve_ep(short_id)
+                key = os.path.basename(ep.ep_dir.rstrip("/"))
+                try:
+                    save_hint_to_md(hints_path, key, text)
+                    ep.hint = (text or "").strip()
+                    return f"✅ saved hint for `{key}`"
+                except Exception as e:
+                    return f"⚠️ save failed: {e}"
+
+            hint_save.click(_save_hint, inputs=[ep_dropdown, hint_box],
+                            outputs=[hint_status])
 
         def _on_slider(short_id, frame_idx, overlay):
             ep = _resolve_ep(short_id)
@@ -1380,7 +1434,7 @@ def main():
         print(f"[v3 viewer] video cache: {n_ok}/{len(eps)} eps ready "
               f"(missing: {len(eps) - n_ok})")
 
-    build_ui(eps, args.port, video_cache=video_cache)
+    build_ui(eps, args.port, video_cache=video_cache, hints_path=args.hints)
 
 
 if __name__ == "__main__":

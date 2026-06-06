@@ -55,7 +55,8 @@ Run with the venv python: `policy/lap/.venv/bin/python3 ssaa_client.py <cmd>`.
 | command | what it does |
 |---|---|
 | `stats` | server counts: total / available / hinted / annotated, by outcome |
-| `claim-hint --n K [--outcome …] [--no-prune]` | first **auto-prune** already-submitted eps from the workspace, then claim K *unhinted* eps → rsync raw + extract → `raw_eps_remote/<uuid>/`; seed `hints.md` with each `task`. (`--n 0` = prune only.) |
+| `hint-round [--success 8] [--failure 2] [--port 7864] [--no-viewer]` | **one-command hint loop**: push last round's hints → prune submitted → claim a success/failure mix → open the viewer to write the new hints in-page |
+| `claim-hint --n K [--outcome …] [--no-prune]` | (lower-level) auto-prune submitted eps, then claim K *unhinted* eps → extract → `raw_eps_remote/<uuid>/`; seed `hints.md`. (`--n 0` = prune only.) |
 | `push-hints` | parse `raw_eps_remote/hints.md`, push filled hints to server (status→hinted) |
 | `claim-annot --n K` | claim K *hinted, un-annotated* eps → rsync + extract + write their hints into `hints.md` |
 | `push-annot` | scp every local `annotation_subagent_v3.json` (+ audit) to the server, mark annotated |
@@ -68,17 +69,14 @@ Run with the venv python: `policy/lap/.venv/bin/python3 ssaa_client.py <cmd>`.
 Working set: `policy/lap/local_data/raw_eps_remote/` (ep dirs named by uuid +
 `hints.md`). Raw h5/MP4 mirror: `~/datasets/droid_raw/1.0.1/` (= `DROID_RAW_ROOT`).
 
-## 2. Writing hints (human step, viewer)
-After `claim-hint`, launch the preview viewer and write hints into `hints.md`
-(one `## <uuid-dir>` section per ep; placeholder lines starting `(task:` are
-ignored until filled):
-```
-cd policy/lap/scripts
-../.venv/bin/python3 view_droid_v3.py --images-dir ../local_data/raw_eps_remote \
-   --suffix subagent_v3 --include-unannotated --hints ../local_data/raw_eps_remote/hints.md \
-   --load-video --port 7864
-```
-Then `ssaa_client.py push-hints`.
+## 2. Writing hints (human step) — use `hint-round`
+`hint-round` (above) is the normal path: it claims the batch and opens the
+viewer with an editable **✍️ Write hint** box per episode — type the hint, click
+**💾 Save** (writes to `hints.md`), Ctrl-C, re-run `hint-round` to push + pull the
+next batch. See `HINTING.md` for the full loop. The viewer started with `--hints`
+is in **hint-writing mode**; without it, it's read-only. Manual fallback:
+hand-edit `raw_eps_remote/hints.md` (one `## <uuid-dir>` section per ep;
+`(task: …)` placeholders are ignored until filled) and `push-hints`.
 
 ## 3. Annotation (sub-agents)
 Prereqs: the episodes are in `raw_eps_remote/<uuid>/` with their hint in

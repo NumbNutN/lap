@@ -598,6 +598,26 @@ def load_kf_image(path: str) -> np.ndarray | None:
 # Optional full-video cache (decode MP4 → in-memory JPEG bytes)
 # ───────────────────────────────────────────────────────────────────────────
 
+def resolve_mp4_paths(raw_root: str, episode_id: str) -> tuple[str | None, str | None]:
+    """(ext_mp4, wrist_mp4) absolute paths in the raw mirror for an episode,
+    or None where unavailable. raw_root = DROID_RAW_ROOT mirror."""
+    raw_root = os.path.expanduser(raw_root or "")
+    h5_path = os.path.join(raw_root, episode_id)
+    if not os.path.exists(h5_path):
+        return None, None
+    ep_root = os.path.dirname(h5_path)
+    md_files = list(Path(ep_root).glob("metadata_*.json"))
+    if not md_files:
+        return None, None
+    raw_meta = json.load(open(md_files[0]))
+    wrist_serial = raw_meta.get("wrist_cam_serial", "")
+    primary_ext = raw_meta.get("ext1_cam_serial", "") or raw_meta.get("ext2_cam_serial", "")
+    rec_dir = os.path.join(ep_root, "recordings", "MP4")
+    ext_mp4 = os.path.join(rec_dir, f"{primary_ext}.mp4") if primary_ext else None
+    wrist_mp4 = os.path.join(rec_dir, f"{wrist_serial}.mp4") if wrist_serial else None
+    return ext_mp4, wrist_mp4
+
+
 class VideoCache:
     """Decode each ep's ext + wrist MP4 into in-memory JPEG byte lists.
 
@@ -614,20 +634,7 @@ class VideoCache:
         self._missing: set[str] = set()  # episodes we already failed on
 
     def _resolve_mp4_paths(self, episode_id: str) -> tuple[str | None, str | None]:
-        h5_path = os.path.join(self.droid_raw_root, episode_id)
-        if not os.path.exists(h5_path):
-            return None, None
-        ep_root = os.path.dirname(h5_path)
-        md_files = list(Path(ep_root).glob("metadata_*.json"))
-        if not md_files:
-            return None, None
-        raw_meta = json.load(open(md_files[0]))
-        wrist_serial = raw_meta.get("wrist_cam_serial", "")
-        primary_ext = raw_meta.get("ext1_cam_serial", "") or raw_meta.get("ext2_cam_serial", "")
-        rec_dir = os.path.join(ep_root, "recordings", "MP4")
-        ext_mp4 = os.path.join(rec_dir, f"{primary_ext}.mp4") if primary_ext else None
-        wrist_mp4 = os.path.join(rec_dir, f"{wrist_serial}.mp4") if wrist_serial else None
-        return ext_mp4, wrist_mp4
+        return resolve_mp4_paths(self.droid_raw_root, episode_id)
 
     def _decode_mp4(self, path: str | None) -> list[bytes]:
         if not path or not os.path.exists(path):
@@ -1190,12 +1197,28 @@ def _strip_think(s: str) -> str:
 
 def build_ui(episodes: list[V3Episode], port: int,
              video_cache: VideoCache | None = None,
-             hints_path: str | None = None) -> None:
+             hints_path: str | None = None,
+             raw_root: str | None = None) -> None:
     if not episodes:
         raise SystemExit("No v3 episodes loaded.")
     by_short: dict[str, V3Episode] = {ep.short_id: ep for ep in episodes}
     overlay_available = any(ep.axis_overlay for ep in episodes)
     hint_editable = bool(hints_path)
+    raw_root = os.path.expanduser(
+        raw_root or os.environ.get("DROID_RAW_ROOT") or "~/datasets/droid_raw/1.0.1")
+
+    def _ep_video(ep: V3Episode):
+        """(ext_mp4_path_or_None, markdown_with_links) for the raw mirror video."""
+        ext, wrist = resolve_mp4_paths(raw_root, ep.episode_id)
+        if not (ext or wrist):
+            return None, ("_Raw video not in the local mirror "
+                          f"(`{raw_root}`) — claim/pull this episode first._")
+        import urllib.parse as _u
+        folder = os.path.dirname(ext or wrist)
+        links = "  ·  ".join(
+            f"[▶ {name} camera](/file={_u.quote(p)})"
+            for name, p in (("ext", ext), ("wrist", wrist)) if p)
+        return ext, f"{links}\n\n**Folder:** `{folder}`"
 
     def _resolve_ep(short_id: str) -> V3Episode:
         return by_short.get(short_id, episodes[0])
@@ -1224,6 +1247,12 @@ def build_ui(episodes: list[V3Episode], port: int,
             label="episode", interactive=True,
         )
         meta_panel = gr.Markdown(_meta_md(init_ep))
+
+        _init_vid, _init_vid_md = _ep_video(init_ep)
+        with gr.Accordion("🎬 Raw video — click ▶ to play in the browser", open=False):
+            raw_video = gr.Video(value=_init_vid, label="ext camera (full MP4)",
+                                 interactive=False, height=360)
+            raw_video_links = gr.Markdown(_init_vid_md)
 
         if hint_editable:
             with gr.Accordion("✍️ Write hint (saved to hints.md)", open=True):
@@ -1299,6 +1328,12 @@ def build_ui(episodes: list[V3Episode], port: int,
                      anchor_panel, ribbon_plot, audit_panel, table],
         )
 
+        def _on_ep_video(short_id):
+            return _ep_video(_resolve_ep(short_id))
+
+        ep_dropdown.change(_on_ep_video, inputs=[ep_dropdown],
+                           outputs=[raw_video, raw_video_links])
+
         if hint_editable:
             def _load_hint(short_id):
                 ep = _resolve_ep(short_id)
@@ -1350,8 +1385,10 @@ def build_ui(episodes: list[V3Episode], port: int,
         )
 
     print(f"[v3 viewer] launching on http://0.0.0.0:{port}")
+    allowed = [raw_root] if os.path.isdir(raw_root) else []
     demo.queue().launch(server_name="0.0.0.0", server_port=port,
-                        prevent_thread_lock=False, share=False)
+                        prevent_thread_lock=False, share=False,
+                        allowed_paths=allowed)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -1429,11 +1466,11 @@ def main():
     if not eps:
         sys.exit(f"No annotation_{args.suffix}.json files under {args.images_dir}.")
 
+    raw_root = (args.droid_raw_root
+                or os.environ.get("DROID_RAW_ROOT")
+                or "~/datasets/droid_raw/1.0.1")
     video_cache = None
     if args.load_video:
-        raw_root = (args.droid_raw_root
-                    or os.environ.get("DROID_RAW_ROOT")
-                    or "~/datasets/droid_raw/1.0.1")
         video_cache = VideoCache(raw_root)
         # Eagerly initialize each ep — uses frames/<view>/fNNNN.jpg if present,
         # else falls back to in-memory MP4 decode under DROID_RAW_ROOT.
@@ -1445,7 +1482,8 @@ def main():
         print(f"[v3 viewer] video cache: {n_ok}/{len(eps)} eps ready "
               f"(missing: {len(eps) - n_ok})")
 
-    build_ui(eps, args.port, video_cache=video_cache, hints_path=args.hints)
+    build_ui(eps, args.port, video_cache=video_cache, hints_path=args.hints,
+             raw_root=raw_root)
 
 
 if __name__ == "__main__":

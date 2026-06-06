@@ -86,19 +86,27 @@ def _extract_batch(eps: list[dict], dest: str | None = None):
     wl.write("ep_id,classification\n")
     relmap = {}
     pulled = 0
-    for e in eps:
-        if _rsync_ep(e["rel"]):
+    n = len(eps)
+    for i, e in enumerate(eps, 1):
+        short = os.path.basename(e["rel"])
+        sys.stdout.write(f"\r  pulling {i}/{n}  {short[:46]:<46}")
+        sys.stdout.flush()
+        if _rsync_ep(e["rel"]):          # prints its own line on failure
             wl.write(f"{e['rel']}/trajectory.h5,good\n")
             relmap[f"{e['rel']}/trajectory.h5"] = e
             pulled += 1
     wl.close()
+    if n:
+        sys.stdout.write(f"\r  pulled {pulled}/{n} episode(s){' ' * 46}\n")
+        sys.stdout.flush()
     if not pulled:
         return []
     out = tempfile.mkdtemp(prefix="ssaa_out_")
     env = dict(os.environ, DROID_RAW_ROOT=MIRROR)
+    print(f"  extracting {pulled} episode(s) (decoding frames)…", flush=True)
     subprocess.run([VENV_PY, EXTRACT, "--root", MIRROR, "--out", out,
                     "--whitelist", wl.name, "--include-failure"],
-                   env=env, capture_output=True, text=True)
+                   env=env)             # uncaptured → streams [ok] epN … per ep
     done = []
     for name in os.listdir(out):
         d = os.path.join(out, name)

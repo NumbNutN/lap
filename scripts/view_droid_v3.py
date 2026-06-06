@@ -457,6 +457,13 @@ def load_v3_episodes(images_dir: str, suffix: str,
         ep_basename = os.path.basename(ep_dir.rstrip("/"))
         ep_hint = hints.get(ep_basename, "")
         ep_outcome = _detect_outcome(ep_dir)
+        if ep_outcome == "unknown":          # uuid-named dirs lack the token;
+            try:                             # the real outcome is in meta.json
+                mo = json.load(open(meta_p)).get("outcome")
+                if mo in ("success", "failure"):
+                    ep_outcome = mo
+            except Exception:
+                pass
         if not os.path.exists(ann_p):
             if include_unannotated:
                 ep = _build_unannotated_episode(ep_dir, meta_p)
@@ -1220,6 +1227,8 @@ def build_ui(episodes: list[V3Episode], port: int,
 
         if hint_editable:
             with gr.Accordion("✍️ Write hint (saved to hints.md)", open=True):
+                hint_outcome = gr.Markdown(
+                    f"This episode is a {_outcome_chip_html(init_ep.outcome)}")
                 hint_box = gr.Textbox(
                     value=init_ep.hint, lines=4, label=None, show_label=False,
                     placeholder=("What is the task (object, goal)? For a failure: "
@@ -1292,10 +1301,12 @@ def build_ui(episodes: list[V3Episode], port: int,
 
         if hint_editable:
             def _load_hint(short_id):
-                return _resolve_ep(short_id).hint, ""
+                ep = _resolve_ep(short_id)
+                return (ep.hint, "",
+                        f"This episode is a {_outcome_chip_html(ep.outcome)}")
 
             ep_dropdown.change(_load_hint, inputs=[ep_dropdown],
-                               outputs=[hint_box, hint_status])
+                               outputs=[hint_box, hint_status, hint_outcome])
 
             def _save_hint(short_id, text):
                 ep = _resolve_ep(short_id)

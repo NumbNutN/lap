@@ -1207,8 +1207,9 @@ def build_ui(episodes: list[V3Episode], port: int,
     raw_root = os.path.expanduser(
         raw_root or os.environ.get("DROID_RAW_ROOT") or "~/datasets/droid_raw/1.0.1")
 
-    def _ep_video(ep: V3Episode):
-        """(ext_mp4_path_or_None, markdown_with_links) for the raw mirror video."""
+    def _ep_video(ep: V3Episode, cam: str = "ext"):
+        """(selected_mp4_path_or_None, markdown_with_links) for the raw mirror
+        video. `cam` picks which camera feeds the inline player (ext|wrist)."""
         ext, wrist = resolve_mp4_paths(raw_root, ep.episode_id)
         if not (ext or wrist):
             return None, ("_Raw video not in the local mirror "
@@ -1218,7 +1219,8 @@ def build_ui(episodes: list[V3Episode], port: int,
         links = "  ·  ".join(
             f"[▶ {name} camera](/file={_u.quote(p)})"
             for name, p in (("ext", ext), ("wrist", wrist)) if p)
-        return ext, f"{links}\n\n**Folder:** `{folder}`"
+        chosen = (wrist if cam == "wrist" else ext) or ext or wrist
+        return chosen, f"{links}\n\n**Folder:** `{folder}`"
 
     def _resolve_ep(short_id: str) -> V3Episode:
         return by_short.get(short_id, episodes[0])
@@ -1248,9 +1250,11 @@ def build_ui(episodes: list[V3Episode], port: int,
         )
         meta_panel = gr.Markdown(_meta_md(init_ep))
 
-        _init_vid, _init_vid_md = _ep_video(init_ep)
+        _init_vid, _init_vid_md = _ep_video(init_ep, "ext")
         with gr.Accordion("🎬 Raw video — click ▶ to play in the browser", open=False):
-            raw_video = gr.Video(value=_init_vid, label="ext camera (full MP4)",
+            cam_radio = gr.Radio(["ext", "wrist"], value="ext", label="camera",
+                                  interactive=True)
+            raw_video = gr.Video(value=_init_vid, label="full MP4",
                                  interactive=False, height=360)
             raw_video_links = gr.Markdown(_init_vid_md)
 
@@ -1328,11 +1332,17 @@ def build_ui(episodes: list[V3Episode], port: int,
                      anchor_panel, ribbon_plot, audit_panel, table],
         )
 
-        def _on_ep_video(short_id):
-            return _ep_video(_resolve_ep(short_id))
+        def _on_ep_video(short_id, cam):
+            return _ep_video(_resolve_ep(short_id), cam)
 
-        ep_dropdown.change(_on_ep_video, inputs=[ep_dropdown],
+        ep_dropdown.change(_on_ep_video, inputs=[ep_dropdown, cam_radio],
                            outputs=[raw_video, raw_video_links])
+
+        def _on_cam(short_id, cam):
+            return _ep_video(_resolve_ep(short_id), cam)[0]
+
+        cam_radio.change(_on_cam, inputs=[ep_dropdown, cam_radio],
+                         outputs=[raw_video])
 
         if hint_editable:
             def _load_hint(short_id):

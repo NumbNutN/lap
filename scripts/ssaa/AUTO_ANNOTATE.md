@@ -62,7 +62,9 @@ Repeat:
    $PY $CLIENT prune --yes           # drop this batch's now-redundant scratch dirs
    ```
 7. Log a one-line batch summary (claimed uuids, audit pass count, running total),
-   then go back to step 1.
+   then go back to step 1. If any audit issues recurred or a rule felt
+   ambiguous/impossible, submit a friction report (do NOT edit the spec):
+   `$PY $CLIENT push-report --worker $SSAA_WORKER --note "…verbatim…"`.
 
 ## Guardrails
 - **Parallel cap 50.** Never launch more than 50 subagents concurrently. If
@@ -73,6 +75,10 @@ Repeat:
 - **Don't poll hot.** Idle waits are ≥ ~900s (`ScheduleWakeup`), not tight loops.
 - **Gate is non-negotiable.** Only audit-clean episodes get pushed; a failing ep
   is re-annotated, not shipped.
+- **Spec is frozen.** Never edit `prompt_ssaa_v3.md` or `audit_v3.py` (and don't
+  let sub-agents) to make the audit pass — that's teaching to the test and
+  causes silent per-worker drift. If a rule is genuinely ambiguous/impossible,
+  record it in your batch report for central review; never patch the spec.
 - **Backup every batch.** The remote store may be wiped; `backup` is your durable
   copy of all annotations + hints + state.
 - **Socket drops.** If any `ssh`/`rsync` step fails because the master died,

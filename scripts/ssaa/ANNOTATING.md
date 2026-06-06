@@ -18,6 +18,20 @@ PY="$LAP/.venv/bin/python3"; CLIENT="$LAP/scripts/ssaa/ssaa_client.py"
 Env not set up yet? See the lap README → "SSAA-v3 Data Annotation" (a minimal
 `uv venv` + `scripts/ssaa/requirements-annotate.txt`, no training stack).
 
+## ⚠️ The spec is frozen — do NOT edit it
+`scripts/annotate_droid/prompt_ssaa_v3.md` and
+`scripts/data_pipeline/audit_v3.py` are the shared, curated source of truth.
+**Never edit them — and never let a sub-agent edit them — to make the audit
+pass.** A repeated audit failure is a *signal*, not something to silence:
+- if it's your annotation's error → fix the annotation and re-run;
+- if you believe a rule is genuinely ambiguous, contradictory, or impossible for
+  an episode → comply as best you can and **record it in a report** (step 7) for
+  central review. Do not add HARD RULEs or patch the prompt yourself.
+
+Per-worker spec edits cause silent drift: different workers end up annotating to
+different specs and the dataset becomes inconsistent. Spec changes are made
+centrally and deliberately, never by the annotator to satisfy its own auditor.
+
 ## 1. Open the SSH connection (shared master socket)
 ```
 $PY $CLIENT stats
@@ -72,6 +86,9 @@ dataset — NOT necessarily a pour).
 
 STEP 1 — Read the system prompt IN FULL and apply ALL of it:
   <LAP>/scripts/annotate_droid/prompt_ssaa_v3.md
+This prompt is a FROZEN spec — follow it, do NOT modify it. If a rule seems
+impossible for this episode, comply as best you can and FLAG it in your return
+(never work around it by editing the prompt).
 Conventions (all in the prompt — don't re-derive): begin/end keyframes are
 S-only brackets (A=S_pred=A_correct=null) and the Plan rides on the FIRST
 MOVING keyframe (its policy-target field leads with <think>Plan…</think>);
@@ -141,9 +158,17 @@ This scp's every validated annotation in `$SSAA_RAW_EPS` to the server
 (`/localdisk-tmp/ssaa/annotations/<uuid>/`), keeps the local copy, and marks
 them annotated. `$PY $CLIENT stats` should show the annotated count rise.
 
-## 7. Loop
-Repeat 3–6 until `stats` shows no hinted-and-unannotated episodes. Report a
-short summary (how many you annotated, any episodes you skipped and why).
+## 7. Loop & report
+Repeat 3–6 until `stats` shows no hinted-and-unannotated episodes. Then submit a
+friction report — the ONLY channel for spec problems (do NOT edit
+`prompt_ssaa_v3.md` or `audit_v3.py`):
+```
+$PY $CLIENT push-report --worker $SSAA_WORKER \
+   --note "any audit issues you could not resolve; any rule that felt ambiguous/impossible (verbatim)"
+```
+This re-audits your workspace and uploads the audit CSV + your note to the
+server for central review. Also give the user a short chat summary (how many
+annotated, any skipped and why).
 
 ## Notes
 - The dataset is task-diverse and DROID `current_task` labels are unreliable —

@@ -29,6 +29,7 @@ if not os.path.exists(VENV_PY):          # fall back to the interpreter running 
     VENV_PY = sys.executable
 SCRIPTS = f"{LAP_ROOT}/scripts"
 EXTRACT = f"{SCRIPTS}/data_pipeline/extract_raw.py"
+AUDIT = f"{SCRIPTS}/data_pipeline/audit_v3.py"
 LOCAL_DATA = f"{LAP_ROOT}/local_data"
 MIRROR = os.path.expanduser("~/datasets/droid_raw/1.0.1")
 # Working set is per-worker so two Claude sessions on one machine don't collide
@@ -44,6 +45,7 @@ REMOTE_COORD = f"cd {REMOTE_SSAA} && python3 coord.py"
 REMOTE_ANNOT = f"{REMOTE_SSAA}/annotations"
 REMOTE_HINTS = f"{REMOTE_SSAA}/hints"
 REMOTE_STATE = f"{REMOTE_SSAA}/state.json"
+REMOTE_REPORTS = f"{REMOTE_SSAA}/reports"
 
 
 def _sanitize(uuid: str) -> str:
@@ -303,7 +305,7 @@ def cmd_push_annot(args):
             continue
         rdir = f"{REMOTE_ANNOT}/{uuid}"
         subprocess.run(["ssh", SSH, f"mkdir -p '{rdir}'"], capture_output=True)
-        files = [ann]
+        files = [ann, mp]                     # meta.json too → lightweight central re-audit
         aud = ann + ".audit.json"
         if os.path.exists(aud):
             files.append(aud)
@@ -559,6 +561,104 @@ def cmd_prune(args):
           + ("" if args.yes else "   (re-run with --yes to delete)"))
 
 
+def _audit_summary(csv_path: str) -> dict:
+    """Parse an audit_v3 CSV → {n, clean, issues:{name:count}} aggregating
+    gate_issues (comma-joined `kf{i}:name` tokens) by issue name."""
+    import csv as _csv
+    rows = list(_csv.DictReader(open(csv_path)))
+    issues: dict[str, int] = {}
+    clean = 0
+    for r in rows:
+        if (r.get("gate_ok") == "True" and r.get("bounds_ok") == "True"
+                and (r.get("n_spred_echoes_a") or "0") == "0"):
+            clean += 1
+        for tok in (r.get("gate_issues") or "").split(","):
+            tok = tok.strip()
+            if tok:
+                name = tok.split(":", 1)[1] if ":" in tok else tok
+                issues[name] = issues.get(name, 0) + 1
+        if r.get("bounds_ok") == "False":
+            issues["bounds-violation"] = issues.get("bounds-violation", 0) + 1
+        if (r.get("n_spred_echoes_a") or "0") not in ("0", ""):
+            issues["spred-echo"] = issues.get("spred-echo", 0) + 1
+    return {"n": len(rows), "clean": clean,
+            "issues": dict(sorted(issues.items(), key=lambda kv: -kv[1]))}
+
+
+def cmd_push_report(args):
+    """Worker → server: re-audit the local annotated set and upload the audit
+    CSV + a friction report (free-text notes on recurring audit issues or
+    ambiguous spec rules) to reports/<worker>_<ts>/. This is the channel for
+    spec problems — NOT editing the prompt."""
+    csv_path = f"/tmp/ssaa_report_{args.worker}.csv"
+    subprocess.run([VENV_PY, AUDIT, "--raw-root", RAW_EPS,
+                    "--pattern", "annotation_subagent_v3.json", "--out", csv_path])
+    if not os.path.exists(csv_path):
+        sys.exit("audit produced no CSV (nothing annotated in this workspace?)")
+    summ = _audit_summary(csv_path)
+    note = args.note or ""
+    if args.note_file and os.path.exists(args.note_file):
+        note = open(args.note_file).read()
+    rid = f"{args.worker}_{time.strftime('%Y%m%d_%H%M%S')}"
+    report = {"worker": args.worker, "id": rid, "summary": summ, "note": note}
+    local = f"/tmp/{rid}.report.json"
+    json.dump(report, open(local, "w"), indent=2, ensure_ascii=False)
+    rdir = f"{REMOTE_REPORTS}/{rid}"
+    subprocess.run(["ssh", SSH, f"mkdir -p '{rdir}'"], capture_output=True)
+    subprocess.run(["scp", "-q", local, csv_path, f"{SSH}:{rdir}/"], capture_output=True)
+    print(f"report {rid}: {summ['n']} eps, {summ['clean']} clean")
+    if summ["issues"]:
+        print("  issues:", ", ".join(f"{k}×{v}" for k, v in summ["issues"].items()))
+    if note.strip():
+        print(f"  note: {note.strip()[:120]}")
+    print(f"  → {rdir}")
+
+
+def cmd_audit_all(args):
+    """Central re-audit (lead): rsync ALL server annotations (+ meta.json) and
+    reports locally, run audit_v3 authoritatively, aggregate gate_issues, and
+    print every worker's friction note — the basis for deciding deliberate
+    (central) spec changes vs re-annotation."""
+    import glob as _g
+    dest = f"{LOCAL_DATA}/ssaa_audit_all"
+    os.makedirs(f"{dest}/annotations", exist_ok=True)
+    os.makedirs(f"{dest}/reports", exist_ok=True)
+    subprocess.run(["rsync", "-a", "-e", "ssh", f"{SSH}:{REMOTE_ANNOT}/",
+                    f"{dest}/annotations/"], capture_output=True)
+    subprocess.run(["rsync", "-a", "-e", "ssh", f"{SSH}:{REMOTE_REPORTS}/",
+                    f"{dest}/reports/"], capture_output=True)
+    total = len(_g.glob(f"{dest}/annotations/*/annotation_subagent_v3.json"))
+    have_meta = len(_g.glob(f"{dest}/annotations/*/meta.json"))
+    csv_path = f"{dest}/audit_all.csv"
+    subprocess.run([VENV_PY, AUDIT, "--raw-root", f"{dest}/annotations",
+                    "--pattern", "annotation_subagent_v3.json", "--out", csv_path])
+    summ = _audit_summary(csv_path) if os.path.exists(csv_path) else {"n": 0, "clean": 0, "issues": {}}
+    print(f"\n=== central re-audit ===  ({dest}/audit_all.csv)")
+    print(f"  annotations on server: {total}   audited (have meta.json): {summ['n']}")
+    if total > have_meta:
+        print(f"  ⚠️ {total - have_meta} lack meta.json (pushed before meta upload) "
+              f"— re-push or pull-annot to audit them")
+    print(f"  clean: {summ['clean']}/{summ['n']}")
+    if summ["issues"]:
+        print("  gate issues (by type):")
+        for k, v in summ["issues"].items():
+            print(f"     {v:4d}  {k}")
+    reps = sorted(_g.glob(f"{dest}/reports/*/*.report.json"))
+    notes = []
+    for rp in reps:
+        try:
+            r = json.load(open(rp))
+        except Exception:
+            continue
+        if (r.get("note") or "").strip():
+            notes.append((r.get("worker", "?"), r["note"].strip()))
+    if notes:
+        print(f"\n  worker friction notes ({len(notes)}):")
+        for w, n in notes:
+            print(f"   [{w}] {n[:300]}")
+    print()
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -588,6 +688,11 @@ def main():
     p.add_argument("--no-viewer", action="store_true")
     p.set_defaults(fn=cmd_pull_annot)
     sub.add_parser("local-status").set_defaults(fn=cmd_local_status)
+    p = sub.add_parser("push-report"); p.add_argument("--worker", default="local")
+    p.add_argument("--note", help="free-text friction notes (recurring audit issues, ambiguous rules)")
+    p.add_argument("--note-file", help="read the note from a file instead")
+    p.set_defaults(fn=cmd_push_report)
+    sub.add_parser("audit-all").set_defaults(fn=cmd_audit_all)
     p = sub.add_parser("backup"); p.add_argument("--dir"); p.set_defaults(fn=cmd_backup)
     p = sub.add_parser("prune"); p.add_argument("--yes", action="store_true")
     p.add_argument("--review", action="store_true", help="also prune the review dir")

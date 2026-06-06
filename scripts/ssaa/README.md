@@ -61,6 +61,8 @@ Run with the venv python: `policy/lap/.venv/bin/python3 ssaa_client.py <cmd>`.
 | `claim-annot --n K` | claim K *hinted, un-annotated* eps → rsync + extract + write their hints into `hints.md` |
 | `push-annot` | scp every local `annotation_subagent_v3.json` (+ audit) to the server, mark annotated |
 | `pull-annot [--uuid U…] [--outcome …]` | pull **annotated** eps *from* the server into `ssaa_review/` (re-extract images + drop server annotation + hint) — for human QA of **anyone's** work |
+| `push-report [--worker W] [--note … / --note-file F]` | worker → server: re-audit local set + upload audit CSV + friction note to `reports/` (the ONLY channel for spec problems) |
+| `audit-all` | lead: rsync ALL annotations (+meta) + reports, re-run audit_v3 centrally, aggregate gate_issues by type, print every worker's friction note |
 | `local-status` | every local ep with its lifecycle state + which dirs hold it |
 | `backup [--dir D]` | read-only mirror of **all** server annotations + hints + state.json → `ssaa_backup/` (remote isn't durable; never deletes locally) |
 | `prune [--yes] [--review]` | delete local ep dirs whose content is confirmed on the server (re-pullable); dry-run without `--yes` |
@@ -139,6 +141,16 @@ store is wiped. Multi-worker note: give each annotation worker a unique
 **Companion docs:** `HINTING.md` (human hint pass), `ANNOTATING.md` (one-shot
 context-free annotation), `AUTO_ANNOTATE.md` (autonomous monitor loop — watch for
 hinted eps, pull→annotate→push on its own, ≤50 parallel per batch).
+
+## 3c. The spec is frozen — governance
+`prompt_ssaa_v3.md` and `audit_v3.py` are the **shared, curated source of truth**.
+Annotation workers (and their sub-agents) must **never edit them to make the
+audit pass** — that's teaching-to-the-test and causes silent per-worker drift.
+An audit failure means: fix the annotation (worker error), or escalate via
+`push-report` (genuine spec gap). The lead runs `audit-all` to re-audit
+everything centrally, aggregate the gate-issue patterns, and read the friction
+notes; **spec changes are then made deliberately by the user + lead** — never by
+a worker. (See `ANNOTATING.md` §"spec is frozen".)
 
 ## 4. Server coordinator (`coord.py`, on the pod at `/localdisk-tmp/ssaa/`)
 Stdlib only; `state.json` (flock-guarded) is the single source of truth.

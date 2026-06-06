@@ -199,20 +199,28 @@ def cmd_claim_hint(args):
 
 def _push_hints() -> int:
     """Push filled hints from RAW_EPS/hints.md to the server; return count.
-    Placeholders ((task: …)) are skipped. No exit on empty."""
+    Placeholders ((task: …)) are skipped. No exit on empty.
+
+    The ep-dir name (= section header) is the SANITIZED uuid, so we resolve
+    uuid from the server list rather than the local meta.json — that way hints
+    still push even if the local dir was pruned/deleted (robust to churn)."""
     if not os.path.exists(HINTS_MD):
         return 0
     text = open(HINTS_MD).read()
     secs = re.findall(r"^##\s+(\S+)\s*\n(.*?)(?=^##\s|\Z)", text, re.M | re.S)
+    filled = {k: b.strip() for k, b in secs
+              if b.strip() and not b.strip().startswith("(task:")}
+    if not filled:
+        return 0
+    by_key = {_sanitize(r["uuid"]): r["uuid"]
+              for r in json.loads(coord(["list", "--limit", "100000"]))}
     payload = {}
-    for key, body in secs:
-        body = body.strip()
-        if not body or body.startswith("(task:"):    # unfilled placeholder
-            continue
-        mp = os.path.join(RAW_EPS, key, "meta.json")
-        if not os.path.exists(mp):
-            continue
-        uuid = json.load(open(mp)).get("uuid")
+    for key, body in filled.items():
+        uuid = by_key.get(key)
+        if not uuid:                                 # fallback: local meta.json
+            mp = os.path.join(RAW_EPS, key, "meta.json")
+            if os.path.exists(mp):
+                uuid = json.load(open(mp)).get("uuid")
         if uuid:
             payload[uuid] = body
     if not payload:

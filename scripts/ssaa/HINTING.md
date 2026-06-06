@@ -23,7 +23,11 @@ $PY $CLIENT hint-round --success 7 --failure 3   # adjust the mix
 $PY $CLIENT hint-round --no-viewer          # claim only, print the viewer command
 ```
 In the viewer (http://localhost:7864):
-1. Pick an episode from the dropdown, scrub the video.
+1. Pick an episode from the dropdown, scrub the `frame_idx` slider (with
+   `--load-video` it plays the real video, not just keyframes). For a closer
+   look, expand **🎬 Raw video** — an inline player (click ▶) plus `▶ ext / wrist
+   camera` links that open the raw MP4 in a browser tab, and the mirror folder
+   path. The badge shows whether this ep is a 🟢 success or 🔴 failure.
 2. In the **✍️ Write hint** box, type 1–4 sentences:
    - what the task actually is (object, goal);
    - for a **failure**, where it goes wrong and why (frame range + cause);

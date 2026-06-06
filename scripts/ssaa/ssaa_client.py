@@ -276,8 +276,10 @@ def cmd_hint_round(args):
 
 
 def cmd_claim_annot(args):
-    eps = json.loads(coord(["claim", "--role", "annot", "--n", str(args.n),
-                            "--worker", args.worker]))
+    a = ["claim", "--role", "annot", "--n", str(args.n), "--worker", args.worker]
+    if args.outcome:
+        a += ["--outcome", args.outcome]
+    eps = json.loads(coord(a))
     print(f"claimed {len(eps)} for annotation; pulling + extracting…")
     done = _extract_batch(eps)
     _seed_hints_md(done, with_hint=True)
@@ -532,6 +534,7 @@ def main():
     p.add_argument("--port", type=int, default=7864); p.add_argument("--worker", default="local")
     p.add_argument("--no-viewer", action="store_true"); p.set_defaults(fn=cmd_hint_round)
     p = sub.add_parser("claim-annot"); p.add_argument("--n", type=int, default=5); p.add_argument("--worker", default="local")
+    p.add_argument("--outcome", choices=["success", "failure"])
     p.set_defaults(fn=cmd_claim_annot)
     sub.add_parser("push-annot").set_defaults(fn=cmd_push_annot)
     p = sub.add_parser("pull-annot"); p.add_argument("--uuid", nargs="*")

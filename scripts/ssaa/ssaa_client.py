@@ -216,19 +216,25 @@ def _push_hints() -> int:
         return 0
     by_key = {_sanitize(r["uuid"]): r["uuid"]
               for r in json.loads(coord(["list", "--limit", "100000"]))}
-    payload = {}
+    payload, excl = {}, {}
     for key, body in filled.items():
         uuid = by_key.get(key)
         if not uuid:                                 # fallback: local meta.json
             mp = os.path.join(RAW_EPS, key, "meta.json")
             if os.path.exists(mp):
                 uuid = json.load(open(mp)).get("uuid")
-        if uuid:
+        if not uuid:
+            continue
+        if body.startswith("[[EXCLUDE]]"):           # viewer / hand-written tag
+            excl[uuid] = body[len("[[EXCLUDE]]"):].strip()
+        else:
             payload[uuid] = body
-    if not payload:
-        return 0
-    coord(["set-hint", "--stdin"], stdin=json.dumps(payload))
-    return len(payload)
+    if excl:
+        coord(["exclude", "--stdin"], stdin=json.dumps(excl))
+        print(f"excluded {len(excl)} unusable ep(s)")
+    if payload:
+        coord(["set-hint", "--stdin"], stdin=json.dumps(payload))
+    return len(payload) + len(excl)
 
 
 def cmd_push_hints(args):
@@ -614,6 +620,27 @@ def cmd_push_report(args):
     print(f"  → {rdir}")
 
 
+def cmd_exclude(args):
+    """Mark unusable episodes excluded (claim skips them; export drops them).
+    --uuid takes substring matches on the sanitized uuid; --undo restores."""
+    rows = json.loads(coord(["list", "--limit", "100000"]))
+    by_key = {_sanitize(r["uuid"]): r["uuid"] for r in rows}
+    payload, unmatched = {}, []
+    for pat in (args.uuid or []):
+        s = _sanitize(pat)
+        hit = next((u for k, u in by_key.items() if s in k), None)
+        if hit:
+            payload[hit] = args.reason or ""
+        else:
+            unmatched.append(pat)
+    for p in unmatched:
+        print(f"  [no match] {p}")
+    if not payload:
+        sys.exit("nothing matched")
+    a = ["exclude", "--stdin"] + (["--undo"] if args.undo else [])
+    print(coord(a, stdin=json.dumps(payload)))
+
+
 def cmd_audit_all(args):
     """Central re-audit (lead): rsync ALL server annotations (+ meta.json) and
     reports locally, run audit_v3 authoritatively, aggregate gate_issues, and
@@ -623,9 +650,11 @@ def cmd_audit_all(args):
     dest = f"{LOCAL_DATA}/ssaa_audit_all"
     os.makedirs(f"{dest}/annotations", exist_ok=True)
     os.makedirs(f"{dest}/reports", exist_ok=True)
-    subprocess.run(["rsync", "-a", "-e", "ssh", f"{SSH}:{REMOTE_ANNOT}/",
+    # --delete: this is a scratch mirror of the server, so reflect it exactly
+    # (removed reports/annotations shouldn't linger and skew the re-audit).
+    subprocess.run(["rsync", "-a", "--delete", "-e", "ssh", f"{SSH}:{REMOTE_ANNOT}/",
                     f"{dest}/annotations/"], capture_output=True)
-    subprocess.run(["rsync", "-a", "-e", "ssh", f"{SSH}:{REMOTE_REPORTS}/",
+    subprocess.run(["rsync", "-a", "--delete", "-e", "ssh", f"{SSH}:{REMOTE_REPORTS}/",
                     f"{dest}/reports/"], capture_output=True)
     total = len(_g.glob(f"{dest}/annotations/*/annotation_subagent_v3.json"))
     have_meta = len(_g.glob(f"{dest}/annotations/*/meta.json"))
@@ -693,6 +722,9 @@ def main():
     p.add_argument("--note-file", help="read the note from a file instead")
     p.set_defaults(fn=cmd_push_report)
     sub.add_parser("audit-all").set_defaults(fn=cmd_audit_all)
+    p = sub.add_parser("exclude"); p.add_argument("--uuid", nargs="+")
+    p.add_argument("--reason"); p.add_argument("--undo", action="store_true")
+    p.set_defaults(fn=cmd_exclude)
     p = sub.add_parser("backup"); p.add_argument("--dir"); p.set_defaults(fn=cmd_backup)
     p = sub.add_parser("prune"); p.add_argument("--yes", action="store_true")
     p.add_argument("--review", action="store_true", help="also prune the review dir")

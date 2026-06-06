@@ -1355,6 +1355,8 @@ def build_ui(episodes: list[V3Episode], port: int,
                 with gr.Row():
                     hint_save = gr.Button("💾 Save hint", variant="primary", scale=0)
                     hint_complete = gr.Button("✨ Complete (LLM)", scale=0)
+                    hint_default = gr.Button("✓ Default hint", scale=0)
+                    hint_exclude = gr.Button("🚫 Mark unusable", scale=0)
                     hint_status = gr.Markdown("")
 
         with gr.Row():
@@ -1472,6 +1474,31 @@ def build_ui(episodes: list[V3Episode], port: int,
             hint_complete.click(_complete_hint,
                                 inputs=[ep_dropdown, slider, hint_box],
                                 outputs=[hint_box, hint_status])
+
+            def _default_hint(short_id, draft):
+                ep = _resolve_ep(short_id)
+                if (draft or "").strip():
+                    return gr.update(), "box already has text — just 💾 Save it"
+                task = (ep.task_instruction or "").strip() or "simple task"
+                txt = (f"Routine/clear task: {task}. "
+                       "Annotate exactly what the images show.")
+                save_hint_to_md(hints_path, os.path.basename(ep.ep_dir.rstrip("/")), txt)
+                ep.hint = txt
+                return txt, "✓ default hint filled & saved — claimable for annotation"
+
+            def _exclude_ep(short_id, draft):
+                ep = _resolve_ep(short_id)
+                txt = (draft or "").strip()
+                if not txt.startswith("[[EXCLUDE]]"):
+                    txt = ("[[EXCLUDE]] " + txt).strip()
+                save_hint_to_md(hints_path, os.path.basename(ep.ep_dir.rstrip("/")), txt)
+                ep.hint = txt
+                return txt, "🚫 marked unusable — runs `exclude` on next push-hints"
+
+            hint_default.click(_default_hint, inputs=[ep_dropdown, hint_box],
+                               outputs=[hint_box, hint_status])
+            hint_exclude.click(_exclude_ep, inputs=[ep_dropdown, hint_box],
+                               outputs=[hint_box, hint_status])
 
         def _on_slider(short_id, frame_idx, overlay):
             ep = _resolve_ep(short_id)

@@ -63,6 +63,7 @@ Run with the venv python: `policy/lap/.venv/bin/python3 ssaa_client.py <cmd>`.
 | `pull-annot [--uuid U…] [--outcome …]` | pull **annotated** eps *from* the server into `ssaa_review/` (re-extract images + drop server annotation + hint) — for human QA of **anyone's** work |
 | `push-report [--worker W] [--note … / --note-file F]` | worker → server: re-audit local set + upload audit CSV + friction note to `reports/` (the ONLY channel for spec problems) |
 | `audit-all` | lead: rsync ALL annotations (+meta) + reports, re-run audit_v3 centrally, aggregate gate_issues by type, print every worker's friction note |
+| `exclude --uuid K… [--reason R] [--undo]` | mark unusable episodes `excluded` (claim skips them, export drops them); also triggered by a `[[EXCLUDE]]` tag in hints.md via push-hints |
 | `local-status` | every local ep with its lifecycle state + which dirs hold it |
 | `backup [--dir D]` | read-only mirror of **all** server annotations + hints + state.json → `ssaa_backup/` (remote isn't durable; never deletes locally) |
 | `prune [--yes] [--review]` | delete local ep dirs whose content is confirmed on the server (re-pullable); dry-run without `--yes` |

@@ -247,6 +247,32 @@ def cmd_resolve(args):
             print(json.dumps(None))
 
 
+def cmd_exclude(args):
+    """Mark episodes unusable: status -> excluded (claim skips them; export
+    should drop them). --undo restores the pre-exclude status. Single (--uuid
+    [--reason]) or batch (--stdin {uuid: reason})."""
+    with _Locked() as st:
+        data = json.load(sys.stdin) if args.stdin else {args.uuid: (args.reason or "")}
+        n = 0
+        for u, reason in data.items():
+            r = st["episodes"].get(u)
+            if not r:
+                continue
+            if args.undo:
+                if r["status"] == "excluded":
+                    r["status"] = r.pop("prev_status", None) or (
+                        "hinted" if r.get("hint") else "available")
+                    r.pop("exclude_reason", None)
+                    n += 1
+            elif r["status"] != "excluded":
+                r["prev_status"] = r["status"]
+                r["status"] = "excluded"
+                r["exclude_reason"] = reason
+                r["claimed_by"] = None
+                n += 1
+        print(json.dumps({"restored" if args.undo else "excluded": n, "of": len(data)}))
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -262,6 +288,8 @@ def main():
     p = sub.add_parser("release"); p.add_argument("--role", choices=["hint", "annot"]); p.add_argument("--older-than", type=int); p.add_argument("--worker"); p.set_defaults(fn=cmd_release)
     p = sub.add_parser("list"); p.add_argument("--status"); p.add_argument("--limit", type=int, default=10000); p.set_defaults(fn=cmd_list)
     p = sub.add_parser("resolve"); p.add_argument("--uuid"); p.add_argument("--rel"); p.set_defaults(fn=cmd_resolve)
+    p = sub.add_parser("exclude"); p.add_argument("--uuid"); p.add_argument("--reason")
+    p.add_argument("--stdin", action="store_true"); p.add_argument("--undo", action="store_true"); p.set_defaults(fn=cmd_exclude)
     args = ap.parse_args()
     args.fn(args)
 

@@ -31,6 +31,14 @@ REQUIRED_KF_FIELDS = ["S", "phase_type", "chunk_end_frame", "imitation_supervise
 NONEMPTY_FIELDS = {"S", "phase_type"}     # always non-empty
 ACTING_FIELDS = {"S_pred", "A"}           # non-empty unless begin/end bracket
 
+# Foreshadow: S / S_pred must describe the realized present state, never an
+# impending action ("about to release", "will open", "is going to lift").
+_FORESHADOW = re.compile(
+    r"\babout to\b|\b(?:is|are)\s+going to\b|\bwill\s+"
+    r"(?:open|close|shut|lift|raise|lower|grasp|grip|release|let go|move|begin|"
+    r"start|descend|rise|pull|push|insert|place|drop|reach|swing|rotate|retract|"
+    r"tilt|pour|tip|slide|press)\b", re.I)
+
 
 def load_meta(ep_dir: str) -> dict | None:
     p = os.path.join(ep_dir, "meta.json")
@@ -52,6 +60,8 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         "n_imit_true": 0,
         "n_imit_false": 0,
         "n_overlap_pairs": 0,
+        "n_tiled": 0,        # boundaries where chunk_end == next kf frame_idx
+        "frac_tiled": 0.0,   # n_tiled / acting boundaries (WARNING metric, not gated)
         "mean_phase_len": 0.0,
         "max_phase_len": 0,
         "desc_ok": False,
@@ -59,6 +69,7 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         "gate_ok": True,
         "gate_issues": "",
         "n_spred_echoes_a": 0,
+        "n_foreshadow": 0,
         "first_diverge_kf": -1,
         "n_tool_calls": 0,
         "n_image_reads_claimed": 0,
@@ -114,6 +125,11 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         if isinstance(kf.get("phase_type"), str):
             phase_types_seq.append(kf["phase_type"])
 
+        # Foreshadow gate (S on every kf; S_pred on acting kfs): present-only.
+        if _FORESHADOW.search(str(kf.get("S") or "")):
+            gate_issues.append(f"kf{i}:foreshadow-in-S")
+            row["n_foreshadow"] += 1
+
         # Schema gate.
         if is_bracket:
             # begin/end are S-only: A / S_pred / A_correct must all be null
@@ -134,10 +150,15 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
                 target = corr_txt if imit_g is False else a_txt
                 if "<think>" not in target:
                     gate_issues.append(f"kf{i}:first-move-no-plan-think")
-            # S_pred should not echo A's cm/° (only on acting kfs)
-            sp_nums = set(re.findall(r"\d+\s*cm|\d+\s*°", str(kf.get("S_pred") or "")))
+            # S_pred should not echo A's cm/° (only on acting kfs) → now gated
+            sp_txt = str(kf.get("S_pred") or "")
+            sp_nums = set(re.findall(r"\d+\s*cm|\d+\s*°", sp_txt))
             if sp_nums and (sp_nums & set(re.findall(r"\d+\s*cm|\d+\s*°", a_txt))):
                 row["n_spred_echoes_a"] += 1
+                gate_issues.append(f"kf{i}:spred-echo-A")
+            if _FORESHADOW.search(sp_txt):
+                gate_issues.append(f"kf{i}:foreshadow-in-S_pred")
+                row["n_foreshadow"] += 1
 
         fi = int(kf.get("frame_idx", 0))
         ce = kf.get("chunk_end_frame")
@@ -169,10 +190,19 @@ def audit_annotation(ann_path: str, meta: dict) -> dict:
         if j > 0 and imit_seq[j - 1][1] is False and v is True:
             row["n_recoveries"] += 1
 
-    # Overlap: kf[i].chunk_end_frame > kf[i+1].frame_idx
+    # Overlap (shared chunk_end, expected) vs tiling (chunk_end == next frame_idx,
+    # the degenerate "every kf its own chunk" anti-pattern — warned, not gated:
+    # legitimate for truly intent-less episodes, harmful for task episodes).
+    n_bound = 0
     for i in range(len(ann_kfs) - 1):
-        if chunk_ends[i] > 0 and chunk_ends[i] > frame_idxs[i + 1]:
-            row["n_overlap_pairs"] += 1
+        if chunk_ends[i] > 0:
+            n_bound += 1
+            if chunk_ends[i] > frame_idxs[i + 1]:
+                row["n_overlap_pairs"] += 1
+            elif chunk_ends[i] == frame_idxs[i + 1]:
+                row["n_tiled"] += 1
+    if n_bound:
+        row["frac_tiled"] = round(row["n_tiled"] / n_bound, 2)
 
     if phase_lens:
         row["mean_phase_len"] = round(sum(phase_lens) / len(phase_lens), 1)
@@ -245,19 +275,33 @@ def main():
         w.writerows(rows)
     print(f"Wrote {len(rows)} rows → {args.out}")
 
-    # Summary print
-    n_ok = sum(1 for r in rows if r["parse_ok"] and r["n_kf_match"]
-               and r["bounds_ok"] and r["monotone_ok"]
-               and not r["missing_fields"])
+    # Summary print — "fully clean" now includes the schema gate (gate_ok),
+    # which folds in brackets, think-in-A, first-move-plan, S_pred echo, and
+    # foreshadow. The gate is the real pass/fail; a clean file fails NOTHING.
+    def _clean(r):
+        return (r["parse_ok"] and r["n_kf_match"] and r["bounds_ok"]
+                and r["monotone_ok"] and not r["missing_fields"] and r["gate_ok"])
+    n_ok = sum(1 for r in rows if _clean(r))
     print(f"\n=== Summary ===")
     print(f"  files audited:    {len(rows)}")
     print(f"  fully clean:      {n_ok}")
     print(f"  parse fail:       {sum(1 for r in rows if not r['parse_ok'])}")
     print(f"  kf count mismatch:{sum(1 for r in rows if not r['n_kf_match'])}")
     print(f"  bounds violation: {sum(1 for r in rows if not r['bounds_ok'])}")
-    print(f"  monotone fail:    {sum(1 for r in rows if not r['monotone_ok'])}")
+    print(f"  gate fail:        {sum(1 for r in rows if not r['gate_ok'])}")
+    print(f"  S_pred echo:      {sum(1 for r in rows if r['n_spred_echoes_a'])}"
+          f" files ({sum(r['n_spred_echoes_a'] for r in rows)} kfs)")
+    print(f"  foreshadow:       {sum(1 for r in rows if r['n_foreshadow'])}"
+          f" files ({sum(r['n_foreshadow'] for r in rows)} kfs)")
     print(f"  missing fields:   {sum(1 for r in rows if r['missing_fields'])}")
     print(f"  no description:   {sum(1 for r in rows if not r['desc_ok'])}")
+    over_tiled = [r for r in rows if r["frac_tiled"] >= 0.8]
+    if over_tiled:
+        print(f"  ⚠ over-tiled (≥80% boundaries, NOT gated): {len(over_tiled)} "
+              f"— review chunk_end grouping (ok for intent-less eps):")
+        for r in over_tiled:
+            print(f"      {os.path.basename(os.path.dirname(r['file']))}"
+                  f"  frac_tiled={r['frac_tiled']}")
     if rows:
         avg_overlap = sum(r["n_overlap_pairs"] for r in rows) / len(rows)
         avg_phase = sum(r["mean_phase_len"] for r in rows) / len(rows)
@@ -267,9 +311,7 @@ def main():
         print(f"  avg n_imit_false/ep:  {avg_imitf:.2f}")
 
     # Surface non-clean files
-    bad = [r for r in rows if not (r["parse_ok"] and r["n_kf_match"]
-                                   and r["bounds_ok"] and r["monotone_ok"]
-                                   and not r["missing_fields"])]
+    bad = [r for r in rows if not _clean(r)]
     if bad:
         print(f"\n=== Files needing attention ({len(bad)}) ===")
         for r in bad[:20]:

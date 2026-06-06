@@ -40,6 +40,12 @@ In the viewer (http://localhost:7864):
    fills in a finished hint, which you can edit. Saves repetitive typing.
 4. Click **💾 Save hint** (writes to `hints.md`). Repeat for each episode; leave
    one blank to skip it.
+   - **✓ Default hint** — for a trivially simple ep, one click fills a generic
+     hint (then Save) so it's claimable without typing.
+   - **🚫 Mark unusable** — for an ep that can't be annotated (no clear task,
+     aimless, etc.): tags it, and `push-hints` then runs `exclude` on the
+     server so it's never claimed again (and is dropped on export). Undo with
+     `ssaa_client.py exclude --uuid <key> --undo`.
 4. When done, **Ctrl-C** the viewer and run `hint-round` again — it pushes what
    you just wrote and pulls the next 10.
 

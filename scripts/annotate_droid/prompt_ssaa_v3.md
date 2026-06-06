@@ -26,7 +26,7 @@ when supervised, `A_correct` when not — so `<think>` lives in **one field
 per keyframe, never both**.
 
 - routine → `A`: `descend 5 cm and close` (no think)
-- deliberate (kf0 plan; precision/contact; ambiguity; risk; **physical
+- deliberate (first-move plan; precision/contact; ambiguity; risk; **physical
   effect** — a motion whose point is the consequence it produces, not the move itself) → `A`:
   `<think>handle is narrow, align first</think> descend 5 cm and close`
 - override the demo (`imit=false`) → `A`: plain demo telemetry, may note
@@ -34,8 +34,8 @@ per keyframe, never both**.
   `<think>the cup is tipping… so instead…</think> release and re-orient`
 
 Emitting `<think>` is your judgment — independent of `imitation_supervised`.
-`A` is on every keyframe (even a failure is valid world-model data,
-`S + A → S_pred`).
+`A` is on every keyframe except the begin/end brackets (S-only); even a
+failure's `A` is valid world-model data (`S + A → S_pred`).
 
 ## Judging each step (`imitation_supervised`)
 
@@ -150,7 +150,8 @@ For each keyframe in `get_keyframe_list`:
 5. (Optional) **`get_image(mid_frame)`** for an intermediate frame when you
    need finer judgment.
 6. **Write `A`** (motion from the pose delta) and **`S_pred`** (the
-   chunk_end image read against `S`) — on **every** keyframe.
+   chunk_end image read against `S`) — on every keyframe except the
+   begin/end brackets (those are S-only; see "Episode brackets").
 7. **Set `imitation_supervised`**; if `false`, also write **`A_correct`**
    (the override). Add a `<think>…</think>` prefix to the policy-target
    field wherever deliberation helps (see "Thinking" above).
@@ -202,7 +203,7 @@ Describe what the chunk_end frame shows *changed* relative to `S`.
   short descent from grasp"), from `get_pose_delta(chunk_end → that contact
   frame)`. Everything else is qualitative.
 
-## A — the action over this span (every keyframe)
+## A — the action over this span (every keyframe except begin/end)
 
 `A` is the action over `[frame_idx, chunk_end_frame]`, grounded in the tool
 telemetry. On every keyframe: world-model input always, and the BC target
@@ -271,7 +272,7 @@ is. **Open vocabulary** — pick the most natural label for the phase.
 
 Reference labels you can use (or invent your own when none fit):
 
-- `begin` — opening hold; arm at home, no contact yet
+- `begin` — opening bracket; arm at home, no motion yet (S-only)
 - `approach` — gross transport toward the target object
 - `fine_align` — final cm-scale alignment before contact
 - `pick` — grasp closure; from open-fingers-near-object to closed-on-object
@@ -280,18 +281,23 @@ Reference labels you can use (or invent your own when none fit):
 - `release` — opening fingers; object detached
 - `failure` — the phase where the demo's action causes the visible failure
 - `recovery` — post-failure phase; agent diverging to repair / hold pose
-- `end` — final hold pose; episode terminating
+- `end` — closing bracket; final rest pose (S-only)
 
 Lowercase, one or two words separated by underscore. Use the same label
 across keyframes that share a sub-goal (don't proliferate synonyms).
 
-## First-frame plan
+## Episode brackets & the plan
 
-kf0's `A` leads with a `<think>Plan: 1) ... 2) ...</think>` block (the full
-task arc, agent POV) then the first action. Plan how to *succeed*; for a
-failure episode the plan still lays out the *correct* approach — never
-mention the failure or "the demo" (no field may reference a demo).
-(`description` instead narrates what the demo actually did.)
+The **begin** keyframe (arm at home, no motion yet) and the **end** keyframe
+(final rest) are brackets, not actions — their `A` is a no-op hold and their
+`S_pred` a no-change forecast, useless and harmful as targets. Fill **only
+`S`** on both; leave `A`, `S_pred`, `A_correct` null.
+
+So the task **Plan** rides on the **first moving keyframe** (the first
+approach): its `A` leads with `<think>Plan: 1) ... 2) ...</think>` (full task
+arc, agent POV) then the first action. Plan how to *succeed*; for a failure
+episode the plan still lays out the *correct* approach — never mention the
+failure or "the demo". (`description` narrates what the demo actually did.)
 
 ## Output schema
 
@@ -305,8 +311,8 @@ Strictly valid JSON, no markdown fence, no commentary:
       "frame_idx": <int>,
       "phase_type": "<short tag>",
       "S":       "<current scene>",
-      "S_pred":  "<key outcome at chunk_end_frame, future tense>",
-      "A":       "<[<think>…</think>] action; kf0 leads with <think>Plan…</think>>",
+      "S_pred":  null (begin/end)  |  "<key outcome at chunk_end_frame>",
+      "A":       null (begin/end)  |  "<[<think>…</think>] action; first move leads with <think>Plan…</think>>",
       "A_correct": null  |  "<<think>…</think> corrective action>",
       "chunk_end_frame": <int>,
       "imitation_supervised": <bool>
@@ -317,10 +323,12 @@ Strictly valid JSON, no markdown fence, no commentary:
 
 Rules (minimal):
 - `keyframes` length = `get_keyframe_list` length, in order, matching `frame_idx`.
-- `S`, `S_pred`, `A` on every keyframe.
+- `S` on every keyframe. `S_pred` and `A` on every keyframe **except the
+  begin/end brackets** (those are S-only; `A`/`S_pred`/`A_correct` = null).
 - `A_correct` non-null **iff** `imitation_supervised == false`.
 - `<think>…</think>` prefixes at most ONE field per kf — the policy target
-  (`A` when supervised, `A_correct` when not). kf0's `A` leads with `<think>Plan…`.
+  (`A` when supervised, `A_correct` when not). The first moving keyframe's
+  `A` leads with `<think>Plan…`.
 - `chunk_end_frame` satisfies `frame_idx < chunk_end_frame ≤ frame_idx + 60`.
 - `imitation_supervised` is **not** monotone: it may return to `true` when
   the demo recovers onto the good path (only a terminal failure stays `false`).

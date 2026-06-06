@@ -21,16 +21,20 @@ Paths: raw mirror = ~/datasets/droid_raw/1.0.1 (DROID_RAW_ROOT for tools);
 from __future__ import annotations
 import argparse, json, os, re, subprocess, sys, tempfile
 
-REPO = "/home/numbnut/worksapce/RoboTwin"
-VENV_PY = f"{REPO}/policy/lap/.venv/bin/python3"
-SCRIPTS = f"{REPO}/policy/lap/scripts"
+# lap repo root = three levels up from this file (lap/scripts/ssaa/ssaa_client.py),
+# so paths work whether lap is a standalone clone or vendored at RoboTwin/policy/lap.
+LAP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+VENV_PY = os.environ.get("SSAA_VENV_PY", f"{LAP_ROOT}/.venv/bin/python3")
+if not os.path.exists(VENV_PY):          # fall back to the interpreter running us
+    VENV_PY = sys.executable
+SCRIPTS = f"{LAP_ROOT}/scripts"
 EXTRACT = f"{SCRIPTS}/data_pipeline/extract_raw.py"
+LOCAL_DATA = f"{LAP_ROOT}/local_data"
 MIRROR = os.path.expanduser("~/datasets/droid_raw/1.0.1")
 # Working set is per-worker so two Claude sessions on one machine don't collide
 # (raw mirror above is shared — different episodes land in different rel paths).
-RAW_EPS = os.environ.get("SSAA_RAW_EPS", f"{REPO}/policy/lap/local_data/raw_eps_remote")
+RAW_EPS = os.environ.get("SSAA_RAW_EPS", f"{LOCAL_DATA}/raw_eps_remote")
 HINTS_MD = f"{RAW_EPS}/hints.md"
-LOCAL_DATA = f"{REPO}/policy/lap/local_data"
 # Where pull-annot drops cloud annotations for human QA (others' work included).
 REVIEW = os.environ.get("SSAA_REVIEW", f"{LOCAL_DATA}/ssaa_review")
 SSH = "bitahub"                       # ~/.ssh/config alias (ControlMaster)

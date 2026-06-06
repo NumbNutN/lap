@@ -28,6 +28,41 @@ GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 ```
 
+## SSAA-v3 Data Annotation (lightweight — no training stack)
+
+If you're here only to **annotate DROID episodes** for SSAA-v3 (not to train),
+you do **not** need the full environment above (no torch/jax/tensorflow/openpi,
+no submodules). The annotation tools need just a handful of packages.
+
+```bash
+# 1. clone this repo (submodules NOT required for annotation)
+git clone <this-lap-repo-url> lap && cd lap
+
+# 2. create a minimal env with uv (https://docs.astral.sh/uv/)
+uv venv --python 3.11
+uv pip install -r scripts/ssaa/requirements-annotate.txt
+# system OpenSSH (ssh / rsync / scp) must also be installed
+```
+
+That gives you `numpy / h5py / pillow / opencv-python / pexpect`; the client and
+auditor are stdlib-only. (To also run the **viewer** for human hinting, add
+`uv pip install gradio matplotlib`.)
+
+Then everything lives under `scripts/ssaa/` — read it top-to-bottom:
+
+| role | doc |
+|---|---|
+| connection + client reference, data lifecycle | `scripts/ssaa/README.md` |
+| **human**: claim + write hints in the viewer | `scripts/ssaa/HINTING.md` |
+| **Claude**: one-shot claim → annotate → push | `scripts/ssaa/ANNOTATING.md` |
+| **Claude**: autonomous monitor loop (≤50 parallel) | `scripts/ssaa/AUTO_ANNOTATE.md` |
+
+You'll need the data server's SSH details + current (rotating) password from
+whoever owns the dataset — see `scripts/ssaa/README.md` §0 for the one-time
+ControlMaster setup. The client (`scripts/ssaa/ssaa_client.py`) resolves all its
+paths relative to this checkout, so it runs the same whether cloned standalone
+or used inside the RoboTwin monorepo.
+
 ## Real-Robot Evaluation
 
 Example inference script: [scripts/real_robot/droid_main.py](scripts/real_robot/droid_main.py)

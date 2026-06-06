@@ -3,23 +3,31 @@
 You are a Claude annotation worker for the SSAA-v3 DROID dataset. Follow this
 top to bottom. You pull hinted episodes from a shared server, launch one
 sub-agent per episode to write the annotation, validate, and push back. Many
-Claude workers can run at once — the server hands each worker **disjoint**
-episodes (atomic flock claim), so just pick a unique worker id and go.
+Claude workers (even on different machines) can run at once — the server hands
+each worker **disjoint** episodes (atomic flock claim), so just pick a unique
+worker id and go.
 
-Repo root: `/home/numbnut/worksapce/RoboTwin`. Venv python:
-`policy/lap/.venv/bin/python3`. Client: `policy/lap/scripts/ssaa/ssaa_client.py`.
+**Paths.** All paths are relative to your **lap checkout root** — call it `$LAP`
+(in the RoboTwin monorepo that's `policy/lap`; as a standalone clone it's the
+repo root). First:
+```
+cd <your lap checkout>     # the dir containing scripts/ and .venv/
+export LAP=$(pwd)
+PY="$LAP/.venv/bin/python3"; CLIENT="$LAP/scripts/ssaa/ssaa_client.py"
+```
+Env not set up yet? See the lap README → "SSAA-v3 Data Annotation" (a minimal
+`uv venv` + `scripts/ssaa/requirements-annotate.txt`, no training stack).
 
 ## 1. Open the SSH connection (shared master socket)
 ```
-cd /home/numbnut/worksapce/RoboTwin
-policy/lap/.venv/bin/python3 policy/lap/scripts/ssaa/ssaa_client.py stats
+$PY $CLIENT stats
 ```
 - If that prints JSON counts, the master socket is alive — **skip to step 2.**
 - If it errors (no socket): install pexpect and open the master with the
   current temp password. **Ask the user for the password** (it rotates), then:
   ```
-  pip3 install --user pexpect
-  SSAA_PW='<password from user>' policy/lap/.venv/bin/python3 - <<'PY'
+  $LAP/.venv/bin/python3 -m pip install pexpect    # if missing
+  SSAA_PW='<password from user>' $PY - <<'PY'
   import pexpect, os
   c = pexpect.spawn("ssh bitahub 'echo UP'", timeout=45, encoding='utf-8')
   while True:
@@ -30,15 +38,14 @@ policy/lap/.venv/bin/python3 policy/lap/scripts/ssaa/ssaa_client.py stats
   print(c.before)
   PY
   ```
-  (Requires `~/.ssh/config` with a `bitahub` ControlMaster host — see README.)
-  Then re-run `stats`.
+  (Requires `~/.ssh/config` with a `bitahub` ControlMaster host — see
+  `scripts/ssaa/README.md` §0.) Then re-run `stats`.
 
 ## 2. Set your worker identity + a private working dir
 Pick a unique id so two workers don't collide. Use it on **every** command:
 ```
 export SSAA_WORKER=claude-$$        # or any unique tag
-export SSAA_RAW_EPS=/home/numbnut/worksapce/RoboTwin/policy/lap/local_data/raw_eps_$SSAA_WORKER
-PY="policy/lap/.venv/bin/python3"; CLIENT="policy/lap/scripts/ssaa/ssaa_client.py"
+export SSAA_RAW_EPS=$LAP/local_data/raw_eps_$SSAA_WORKER
 ```
 (`SSAA_RAW_EPS` keeps your episodes in your own folder; `push-annot` only
 pushes from there.)
@@ -54,8 +61,9 @@ episodes, there are no hinted-and-unannotated episodes left (check `$PY $CLIENT 
 ## 4. Annotate — one sub-agent per episode
 For EACH claimed episode dir `$SSAA_RAW_EPS/<uuid>/`, read its hint from
 `$SSAA_RAW_EPS/hints.md` (the `## <uuid>` section), then launch ONE sub-agent
-(Agent tool, model **sonnet**, run_in_background) with this prompt — fill in
-EP_PATH, OUTCOME (success/failure from the uuid path or hint), and the HINT:
+(Agent tool, model **sonnet**, run_in_background) with this prompt — substitute
+`<LAP>` with your absolute checkout path, and fill EP_PATH, OUTCOME
+(success/failure from the uuid path or hint), and the HINT:
 
 ```
 Annotate ONE DROID episode for SSAA-v3. Produce two JSON files. Follow the
@@ -63,7 +71,7 @@ system prompt EXACTLY; the task is whatever the hint says (task-diverse
 dataset — NOT necessarily a pour).
 
 STEP 1 — Read the system prompt IN FULL and apply ALL of it:
-  policy/lap/scripts/annotate_droid/prompt_ssaa_v3.md
+  <LAP>/scripts/annotate_droid/prompt_ssaa_v3.md
 Conventions (all in the prompt — don't re-derive): begin/end keyframes are
 S-only brackets (A=S_pred=A_correct=null) and the Plan rides on the FIRST
 MOVING keyframe (its policy-target field leads with <think>Plan…</think>);
@@ -86,8 +94,8 @@ STEP 2 — Episode:
   Hint: <the hint text>
 
 STEP 3 — Tools (EXACT venv python):
-  PY=policy/lap/.venv/bin/python3
-  CLI=policy/lap/scripts/data_pipeline/tools_cli.py
+  PY=<LAP>/.venv/bin/python3
+  CLI=<LAP>/scripts/data_pipeline/tools_cli.py
   - $PY $CLI keyframes "<EP_PATH>"
   - $PY $CLI pose_delta "<EP_PATH>" <i> <j>   (returns delta_robot/ee, rot, gripper)
   - $PY $CLI image "<EP_PATH>" <frame> ext|wrist /tmp/_img_<uuid>.jpg  (then Read it)
@@ -99,7 +107,7 @@ chunk_end image. Use the wrist view where the external view is occluded.
 
 STEP 5 — keyframe list → phases (group by sub-intent → shared chunk_end) →
 per acting keyframe: pose_delta → choose grounding frame → A (imperative, with
-<think> per the gate) → get_image(chunk_end) → S_pred → S (present-only).
+<think> per the gate) → image(chunk_end) → S_pred → S (present-only).
 begin/end = S-only; Plan on the first moving keyframe. keyframes length =
 keyframe-list length, in order, matching frame_idx; frame_idx < chunk_end_frame
 <= frame_idx+60.
@@ -116,7 +124,7 @@ to finish.
 
 ## 5. Validate before pushing
 ```
-$PY policy/lap/scripts/data_pipeline/audit_v3.py \
+$PY $LAP/scripts/data_pipeline/audit_v3.py \
    --raw-root $SSAA_RAW_EPS --pattern annotation_subagent_v3.json --out /tmp/a_$SSAA_WORKER.csv
 ```
 Open the CSV. Each row must have `gate_ok=True`, `bounds_ok=True`, empty

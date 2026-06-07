@@ -133,8 +133,18 @@ def _extract_batch(eps: list[dict], dest: str | None = None):
     return done
 
 
-def _seed_hints_md(done, with_hint: bool, dest: str | None = None):
-    """Append/update hints.md sections for the claimed eps."""
+NO_HINT_MARKER = "[[NO HINT]]"
+
+
+def _seed_hints_md(done, with_hint: bool, dest: str | None = None,
+                   no_hint: bool = False):
+    """Append/update hints.md sections for the claimed eps.
+
+    no_hint=True writes an explicit NO-HINT marker section (deliberately no
+    guidance — annotate from observation/tools only). with_hint=True writes
+    the server-supplied human hint; otherwise a placeholder for a human to
+    fill in the hinting workflow.
+    """
     dest = dest or RAW_EPS
     os.makedirs(dest, exist_ok=True)
     hints_md = os.path.join(dest, "hints.md")
@@ -146,7 +156,9 @@ def _seed_hints_md(done, with_hint: bool, dest: str | None = None):
         key = os.path.basename(target)
         if key in have:
             continue
-        if with_hint and e.get("hint"):
+        if no_hint:
+            body = f"{NO_HINT_MARKER}  (task: {e.get('task','')})"
+        elif with_hint and e.get("hint"):
             body = e["hint"]
         else:
             body = f"(task: {e.get('task','')})  # write the hint below"
@@ -300,13 +312,17 @@ def _pull_teleop_ep(e: dict) -> str | None:
 
 
 def cmd_claim_annot(args):
+    no_hint = getattr(args, "no_hint", False)
     a = ["claim", "--role", "annot", "--n", str(args.n), "--worker", args.worker]
+    if no_hint:
+        a += ["--no-hint"]
     if args.outcome:
         a += ["--outcome", args.outcome]
     if getattr(args, "source", None):
         a += ["--source", args.source]
     eps = json.loads(coord(a))
-    print(f"claimed {len(eps)} for annotation; pulling…")
+    tag = "NO-HINT" if no_hint else "hinted"
+    print(f"claimed {len(eps)} for annotation [{tag}]; pulling…")
     teleop = [e for e in eps if e.get("source") == "teleop"]
     droid = [e for e in eps if e.get("source") != "teleop"]
     done = _extract_batch(droid) if droid else []
@@ -314,8 +330,12 @@ def cmd_claim_annot(args):
         t = _pull_teleop_ep(e)
         if t:
             done.append((e, t))
-    _seed_hints_md(done, with_hint=True)
-    print(f"  pulled {len(done)} → {RAW_EPS} (hints written to hints.md)")
+    # No-hint mode seeds an explicit NO-HINT marker (not a hint) so each
+    # subagent annotates from observation + tools only; otherwise the
+    # server-supplied human hint is written into hints.md as usual.
+    _seed_hints_md(done, with_hint=not no_hint, no_hint=no_hint)
+    where = "no-hint markers" if no_hint else "hints written"
+    print(f"  pulled {len(done)} → {RAW_EPS} ({where} to hints.md)")
     for e, t in done:
         print(f"   {os.path.basename(t)}  [{e.get('source','droid')}/{e['outcome']}]")
     print("\nNext: launch subagents to write annotation_subagent_v3.json into each "
@@ -775,6 +795,10 @@ def main():
     p = sub.add_parser("claim-annot"); p.add_argument("--n", type=int, default=5); p.add_argument("--worker", default="local")
     p.add_argument("--outcome", choices=["success", "failure"])
     p.add_argument("--source", choices=["droid", "teleop"])
+    p.add_argument("--no-hint", action="store_true",
+                   help="claim un-hinted eps straight from the available pool "
+                        "and annotate with no human hint (recorded server-side "
+                        "as annot_mode=nohint). Pair with --outcome success.")
     p.set_defaults(fn=cmd_claim_annot)
     p = sub.add_parser("push-teleop"); p.add_argument("--dir"); p.set_defaults(fn=cmd_push_teleop)
     sub.add_parser("push-annot").set_defaults(fn=cmd_push_annot)

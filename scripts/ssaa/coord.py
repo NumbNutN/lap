@@ -8,17 +8,22 @@ flock-guarded command, which is robust on a read-only-home k8s pod.
 
 Layout (under SSAA_DIR, default /localdisk-tmp/ssaa):
   state.json          ep_uuid -> {rel, lab, outcome, task, status, hint,
-                                  claimed_by, claimed_at, annotated}
+                                  claimed_by, claimed_at, annotated,
+                                  annot_mode, annotated_mode}
   state.lock          flock target for state.json mutations
   hints/<uuid>.txt    human hint
   annotations/<uuid>/annotation_subagent_v3.json (+ .audit.json)  (scp'd here)
 
-status flow: available -> hint_claimed -> hinted -> annot_claimed -> annotated
+status flow:
+  hinted path:  available -> hint_claimed -> hinted -> annot_claimed -> annotated
+  no-hint path: available --------------------------> annot_claimed -> annotated
+  (claim --role annot --no-hint skips hinting; the chosen path is recorded
+   as annot_mode/annotated_mode = hinted|nohint so the two are distinguishable.)
 
 Commands (all print JSON to stdout):
   init [--force]                 scan dataset -> state.json
-  stats                          counts by status/outcome
-  claim --role hint|annot --n K [--outcome success|failure] --worker W
+  stats                          counts by status/outcome (+ annotated_by_mode)
+  claim --role hint|annot --n K [--outcome success|failure] [--no-hint] --worker W
   set-hint --uuid U --hint TEXT   (or --stdin: {uuid: hint, ...})
   mark-annotated --uuid U         (or --stdin: [uuid, ...])
   bulk-import --stdin             {uuid: {hint?, annotated?, status?}}
@@ -131,6 +136,9 @@ def _counts(st):
     c = {"total": 0, "by_status": {}, "by_outcome": {}}
     hinted_out = {"success": 0, "failure": 0}
     annot_out = {"success": 0, "failure": 0}
+    # annotated split by how it was done (hinted vs no-hint) × outcome — this
+    # is what tracks progress toward the "N success" target per mode.
+    annot_mode = {"hinted": {}, "nohint": {}}
     for r in st["episodes"].values():
         c["total"] += 1
         c["by_status"][r["status"]] = c["by_status"].get(r["status"], 0) + 1
@@ -139,8 +147,12 @@ def _counts(st):
             hinted_out[r["outcome"]] = hinted_out.get(r["outcome"], 0) + 1
         if r.get("annotated"):
             annot_out[r["outcome"]] = annot_out.get(r["outcome"], 0) + 1
+            m = r.get("annotated_mode", "hinted")
+            annot_mode.setdefault(m, {})
+            annot_mode[m][r["outcome"]] = annot_mode[m].get(r["outcome"], 0) + 1
     c["hinted"] = hinted_out
     c["annotated"] = annot_out
+    c["annotated_by_mode"] = annot_mode
     return c
 
 
@@ -150,7 +162,14 @@ def cmd_stats(args):
 
 
 def cmd_claim(args):
-    want_status = "available" if args.role == "hint" else "hinted"
+    no_hint = getattr(args, "no_hint", False)
+    # hint role always draws from the available pool. annot normally draws
+    # from `hinted`, but --no-hint lets it claim straight from `available`
+    # (annotate with no human hint) — never touching the hinted queue.
+    if args.role == "hint":
+        want_status = "available"
+    else:
+        want_status = "available" if no_hint else "hinted"
     picked = []
     with _Locked() as st:
         for u, r in st["episodes"].items():
@@ -162,7 +181,14 @@ def cmd_claim(args):
                 continue
             if args.source and r.get("source", "droid") != args.source:
                 continue
-            r["status"] = "hint_claimed" if args.role == "hint" else "annot_claimed"
+            if args.role == "hint":
+                r["status"] = "hint_claimed"
+            else:
+                r["status"] = "annot_claimed"
+                # Stamp the annotation mode onto the record at claim time so
+                # mark-annotated and stats can tell hinted vs no-hint
+                # annotations apart with nothing passed back by the client.
+                r["annot_mode"] = "nohint" if no_hint else "hinted"
             r["claimed_by"] = args.worker
             r["claimed_at"] = int(time.time())
             picked.append({"uuid": u, "rel": r["rel"], "outcome": r["outcome"],
@@ -208,6 +234,9 @@ def cmd_mark_annotated(args):
             if r:
                 r["annotated"] = True
                 r["status"] = "annotated"
+                # Freeze how this ep was annotated (hinted vs no-hint) from
+                # the mode stamped at claim time; legacy claims default hinted.
+                r["annotated_mode"] = r.get("annot_mode", "hinted")
                 r["claimed_by"] = None
                 ok += 1
         print(json.dumps({"marked": ok, "of": len(uuids)}))
@@ -236,7 +265,6 @@ def cmd_release(args):
     now = int(time.time())
     claimed = {"hint": "hint_claimed", "annot": "annot_claimed"}
     targets = [claimed[args.role]] if args.role else list(claimed.values())
-    back = {"hint_claimed": "available", "annot_claimed": "hinted"}
     with _Locked() as st:
         n = 0
         for r in st["episodes"].values():
@@ -246,7 +274,12 @@ def cmd_release(args):
                 if args.older_than and r.get("claimed_at") and \
                    now - r["claimed_at"] < args.older_than:
                     continue
-                r["status"] = back[r["status"]]
+                if r["status"] == "hint_claimed":
+                    r["status"] = "available"
+                else:  # annot_claimed → back to its source pool by mode
+                    r["status"] = ("available"
+                                   if r.get("annot_mode") == "nohint"
+                                   else "hinted")
                 r["claimed_by"] = None; r["claimed_at"] = None
                 n += 1
         print(json.dumps({"released": n}))
@@ -257,6 +290,7 @@ def cmd_list(args):
         out = [{"uuid": u, "rel": r["rel"], "outcome": r["outcome"],
                 "status": r["status"], "task": r.get("task", ""),
                 "hint": r.get("hint"), "annotated": r.get("annotated", False),
+                "annotated_mode": r.get("annotated_mode"), "annot_mode": r.get("annot_mode"),
                 "claimed_by": r.get("claimed_by"), "source": r.get("source", "droid"),
                 "source_episode": r.get("source_episode"), "segment_idx": r.get("segment_idx"),
                 "total_segments": r.get("total_segments")}
@@ -345,7 +379,12 @@ def main():
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
     p = sub.add_parser("claim"); p.add_argument("--role", required=True, choices=["hint", "annot"])
     p.add_argument("--n", type=int, default=1); p.add_argument("--outcome", choices=["success", "failure"])
-    p.add_argument("--worker", default="local"); p.add_argument("--source", choices=["droid", "teleop"]); p.set_defaults(fn=cmd_claim)
+    p.add_argument("--worker", default="local"); p.add_argument("--source", choices=["droid", "teleop"])
+    p.add_argument("--no-hint", action="store_true",
+                   help="(annot only) claim straight from the available pool "
+                        "and annotate with no human hint; recorded as "
+                        "annot_mode=nohint")
+    p.set_defaults(fn=cmd_claim)
     p = sub.add_parser("set-hint"); p.add_argument("--uuid"); p.add_argument("--hint")
     p.add_argument("--stdin", action="store_true"); p.set_defaults(fn=cmd_set_hint)
     p = sub.add_parser("mark-annotated"); p.add_argument("--uuid"); p.add_argument("--stdin", action="store_true"); p.set_defaults(fn=cmd_mark_annotated)

@@ -47,7 +47,8 @@ print(c.before)
 PY
 ssh bitahub 'echo REUSE_OK'    # must work without a password now
 ```
-Ask the user for the current temp password (it rotates). All `ssh`/`scp`/
+Ask the user for the SSH password (persistent; never commit it or write it to a
+tracked/shared file). All `ssh`/`scp`/
 `rsync` to `bitahub` then reuse the socket.
 
 ## 1. The client (`policy/lap/scripts/ssaa/ssaa_client.py`)

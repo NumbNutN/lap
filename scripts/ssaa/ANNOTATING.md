@@ -38,7 +38,8 @@ $PY $CLIENT stats
 ```
 - If that prints JSON counts, the master socket is alive — **skip to step 2.**
 - If it errors (no socket): install pexpect and open the master with the
-  current temp password. **Ask the user for the password** (it rotates), then:
+  SSH password. **Ask the user for the password** (it's persistent — but never
+  commit it or write it to a tracked/shared file), then:
   ```
   $LAP/.venv/bin/python3 -m pip install pexpect    # if missing
   SSAA_PW='<password from user>' $PY - <<'PY'

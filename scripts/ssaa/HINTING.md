@@ -77,7 +77,7 @@ Optional overrides: `SSAA_LLM_PROVIDER` (anthropic|openai), `SSAA_LLM_MODEL`,
 
 ## Connection
 If the first command errors, the SSH master dropped — re-open it (ask Claude, or
-run the pexpect one-liner in `README.md` with the current rotating password),
+run the pexpect one-liner in `README.md` with the SSH password),
 then retry.
 
 ## Notes

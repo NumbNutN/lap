@@ -11,7 +11,7 @@ exact subagent prompt, and the validation gate). This file adds the loop.
 ## One-time setup
 1. Connection + identity — do `ANNOTATING.md` steps 1–2 once:
    - ensure the SSH master socket (reuse if alive; else `pip3 install --user
-     pexpect` and the pexpect login — **ask the user for the rotating password**);
+     pexpect` and the pexpect login — **ask the user for the SSH password**);
    - pick a UNIQUE worker id and a private working dir:
      ```
      cd <WORKSPACE>

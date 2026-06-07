@@ -641,6 +641,25 @@ def cmd_exclude(args):
     print(coord(a, stdin=json.dumps(payload)))
 
 
+def cmd_reset_hint(args):
+    """Clear a wrong hint and send the ep back to `available` (re-hintable).
+    --uuid takes substring matches on the sanitized uuid."""
+    rows = json.loads(coord(["list", "--limit", "100000"]))
+    by_key = {_sanitize(r["uuid"]): r["uuid"] for r in rows}
+    picked = []
+    for pat in (args.uuid or []):
+        s = _sanitize(pat)
+        hit = next((u for k, u in by_key.items() if s in k), None)
+        if hit:
+            picked.append(hit)
+        else:
+            print(f"  [no match] {pat}")
+    if not picked:
+        sys.exit("nothing matched")
+    a = ["reset-hint", "--stdin"] + (["--force"] if args.force else [])
+    print(coord(a, stdin=json.dumps(picked)))
+
+
 def cmd_audit_all(args):
     """Central re-audit (lead): rsync ALL server annotations (+ meta.json) and
     reports locally, run audit_v3 authoritatively, aggregate gate_issues, and
@@ -725,6 +744,8 @@ def main():
     p = sub.add_parser("exclude"); p.add_argument("--uuid", nargs="+")
     p.add_argument("--reason"); p.add_argument("--undo", action="store_true")
     p.set_defaults(fn=cmd_exclude)
+    p = sub.add_parser("reset-hint"); p.add_argument("--uuid", nargs="+")
+    p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_reset_hint)
     p = sub.add_parser("backup"); p.add_argument("--dir"); p.set_defaults(fn=cmd_backup)
     p = sub.add_parser("prune"); p.add_argument("--yes", action="store_true")
     p.add_argument("--review", action="store_true", help="also prune the review dir")

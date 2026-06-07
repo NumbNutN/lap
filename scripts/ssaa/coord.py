@@ -273,6 +273,31 @@ def cmd_exclude(args):
         print(json.dumps({"restored" if args.undo else "excluded": n, "of": len(data)}))
 
 
+def cmd_reset_hint(args):
+    """Clear an episode's hint and send it back to `available` (re-hintable).
+    Skips annotated eps unless --force. Single (--uuid) or batch (--stdin [uuids])."""
+    with _Locked() as st:
+        uuids = json.load(sys.stdin) if args.stdin else [args.uuid]
+        n = 0
+        for u in uuids:
+            r = st["episodes"].get(u)
+            if not r:
+                continue
+            if r.get("annotated") and not args.force:
+                continue
+            r["hint"] = None
+            r.pop("exclude_reason", None)
+            if r["status"] in ("hinted", "hint_claimed", "excluded"):
+                r["status"] = "available"
+                r["claimed_by"] = None
+            try:
+                os.remove(os.path.join(HINTS, u + ".txt"))
+            except Exception:
+                pass
+            n += 1
+        print(json.dumps({"reset": n, "of": len(uuids)}))
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -290,6 +315,8 @@ def main():
     p = sub.add_parser("resolve"); p.add_argument("--uuid"); p.add_argument("--rel"); p.set_defaults(fn=cmd_resolve)
     p = sub.add_parser("exclude"); p.add_argument("--uuid"); p.add_argument("--reason")
     p.add_argument("--stdin", action="store_true"); p.add_argument("--undo", action="store_true"); p.set_defaults(fn=cmd_exclude)
+    p = sub.add_parser("reset-hint"); p.add_argument("--uuid"); p.add_argument("--stdin", action="store_true")
+    p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_reset_hint)
     args = ap.parse_args()
     args.fn(args)
 

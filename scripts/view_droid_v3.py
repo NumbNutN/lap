@@ -1472,27 +1472,12 @@ def build_ui(episodes: list[V3Episode], port: int,
                                 inputs=[ep_dropdown, slider, hint_box],
                                 outputs=[hint_box, hint_status])
 
-            def _default_hint(short_id, draft):
-                # Unconditionally OVERWRITE the box with a generic hint and save.
+            def _store(short_id, body):
                 ep = _resolve_ep(short_id)
-                task = (ep.task_instruction or "").strip() or "simple task"
-                txt = (f"Routine/clear task: {task}. "
-                       "Annotate exactly what the images show.")
-                save_hint_to_md(hints_path, os.path.basename(ep.ep_dir.rstrip("/")), txt)
-                ep.hint = txt
-                return txt, "✓ default hint saved"
+                save_hint_to_md(hints_path, os.path.basename(ep.ep_dir.rstrip("/")), body)
+                ep.hint = (body or "").strip()
 
-            def _exclude_ep(short_id, draft):
-                # Confirm this episode is unusable (tagged, excluded on push).
-                ep = _resolve_ep(short_id)
-                txt = (draft or "").strip()
-                if not txt.startswith("[[EXCLUDE]]"):
-                    txt = ("[[EXCLUDE]] " + txt).strip()
-                save_hint_to_md(hints_path, os.path.basename(ep.ep_dir.rstrip("/")), txt)
-                ep.hint = txt
-                return txt, "🚫 marked unusable"
-
-            # ── finish current ep → jump to the next not-yet-stored one ──────
+            # ── finish current ep → advance to the next episode ──────────────
             def _goto(short_id, overlay, status=""):
                 ep = _resolve_ep(short_id)
                 s0 = ep.keyframes[0].frame_idx if ep.keyframes else 0
@@ -1525,27 +1510,51 @@ def build_ui(episodes: list[V3Episode], port: int,
                          if cur in choices else choices)
                 return next((s for s in order if not done(s)), None)
 
-            def _finish(cur, overlay):
-                nxt = _next_unfinished(cur)
-                if nxt is None:
-                    return _goto(cur, overlay, "✓ every episode now has a hint / tag")
-                return _goto(nxt, overlay, "→ next unfinished episode")
+            def _advance_target(cur):
+                choices = list(by_short.keys())
+                if len(choices) <= 1:
+                    return cur
+                nxt = _next_unfinished(cur)          # prefer next un-stored ep
+                if nxt:
+                    return nxt
+                i = choices.index(cur) if cur in choices else -1
+                return choices[(i + 1) % len(choices)]   # else just next (cycle)
 
             FULL_OUT = [ep_dropdown, slider, meta_panel, ext_img, wrist_img,
                         anchor_panel, ribbon_plot, audit_panel, table,
                         raw_video, raw_video_links, cam_radio, hint_box,
                         hint_outcome, hint_status]
 
-            # save / default / mark-unusable all = "this ep is finished" → advance
-            hint_save.click(_save_hint, inputs=[ep_dropdown, hint_box],
-                            outputs=[hint_status]).then(
-                _finish, inputs=[ep_dropdown, overlay_chk], outputs=FULL_OUT)
-            hint_default.click(_default_hint, inputs=[ep_dropdown, hint_box],
-                               outputs=[hint_box, hint_status]).then(
-                _finish, inputs=[ep_dropdown, overlay_chk], outputs=FULL_OUT)
-            hint_exclude.click(_exclude_ep, inputs=[ep_dropdown, hint_box],
-                               outputs=[hint_box, hint_status]).then(
-                _finish, inputs=[ep_dropdown, overlay_chk], outputs=FULL_OUT)
+            def _do_save(short_id, text, overlay):
+                _store(short_id, text or "")
+                return _goto(_advance_target(short_id), overlay, "💾 saved → next episode")
+
+            def _do_default(short_id, overlay):
+                # Deliberately does NOT embed the DROID task label — that label
+                # is often WRONG, and baking it into a "hint" would mislead the
+                # annotator (the whole point is to trust the images, not the
+                # label). The default just lets a trivially-clear ep be claimed.
+                _store(short_id, "(no extra hint — trivially clear episode; "
+                                 "annotate exactly what the images show.)")
+                return _goto(_advance_target(short_id), overlay,
+                             "✓ default hint stored → next episode")
+
+            def _do_exclude(short_id, text, overlay):
+                body = (text or "").strip()
+                if not body.startswith("[[EXCLUDE]]"):
+                    body = ("[[EXCLUDE]] " + body).strip()
+                _store(short_id, body)
+                return _goto(_advance_target(short_id), overlay,
+                             "🚫 marked unusable → next episode")
+
+            # save / default / mark-unusable = "ep finished" → store + advance
+            # (single handler, no .then chain — deterministic)
+            hint_save.click(_do_save, inputs=[ep_dropdown, hint_box, overlay_chk],
+                            outputs=FULL_OUT)
+            hint_default.click(_do_default, inputs=[ep_dropdown, overlay_chk],
+                               outputs=FULL_OUT)
+            hint_exclude.click(_do_exclude, inputs=[ep_dropdown, hint_box, overlay_chk],
+                               outputs=FULL_OUT)
 
         def _on_slider(short_id, frame_idx, overlay):
             ep = _resolve_ep(short_id)

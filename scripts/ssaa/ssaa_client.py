@@ -46,6 +46,8 @@ REMOTE_ANNOT = f"{REMOTE_SSAA}/annotations"
 REMOTE_HINTS = f"{REMOTE_SSAA}/hints"
 REMOTE_STATE = f"{REMOTE_SSAA}/state.json"
 REMOTE_REPORTS = f"{REMOTE_SSAA}/reports"
+REMOTE_TELEOP = "/localdisk-tmp/datasets/teleop_playground"   # self-contained teleop eps
+TELEOP_EPS = os.environ.get("SSAA_TELEOP_EPS", f"{LOCAL_DATA}/teleop_eps")
 
 
 def _sanitize(uuid: str) -> str:
@@ -283,19 +285,69 @@ def cmd_hint_round(args):
                     "--load-video", "--port", str(args.port)])
 
 
+def _pull_teleop_ep(e: dict) -> str | None:
+    """Teleop eps are already self-contained (h5+mp4+kf+meta) on the server —
+    just rsync the whole dir down, no extraction."""
+    os.makedirs(RAW_EPS, exist_ok=True)
+    target = os.path.join(RAW_EPS, _sanitize(e["uuid"]))
+    src = f"{SSH}:{REMOTE_TELEOP}/{e['rel']}/"
+    r = subprocess.run(["rsync", "-a", "--info=stats0", "-e", "ssh", src, target + "/"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"   [rsync fail] {e['rel']}: {r.stderr.strip()[:160]}")
+        return None
+    return target
+
+
 def cmd_claim_annot(args):
     a = ["claim", "--role", "annot", "--n", str(args.n), "--worker", args.worker]
     if args.outcome:
         a += ["--outcome", args.outcome]
+    if getattr(args, "source", None):
+        a += ["--source", args.source]
     eps = json.loads(coord(a))
-    print(f"claimed {len(eps)} for annotation; pulling + extracting…")
-    done = _extract_batch(eps)
+    print(f"claimed {len(eps)} for annotation; pulling…")
+    teleop = [e for e in eps if e.get("source") == "teleop"]
+    droid = [e for e in eps if e.get("source") != "teleop"]
+    done = _extract_batch(droid) if droid else []
+    for e in teleop:                       # self-contained: pull dir, no extract
+        t = _pull_teleop_ep(e)
+        if t:
+            done.append((e, t))
     _seed_hints_md(done, with_hint=True)
-    print(f"  extracted {len(done)} → {RAW_EPS} (hints written to hints.md)")
+    print(f"  pulled {len(done)} → {RAW_EPS} (hints written to hints.md)")
     for e, t in done:
-        print(f"   {os.path.basename(t)}  [{e['outcome']}]")
+        print(f"   {os.path.basename(t)}  [{e.get('source','droid')}/{e['outcome']}]")
     print("\nNext: launch subagents to write annotation_subagent_v3.json into each "
           "ep dir (see README), then: ssaa_client.py push-annot")
+
+
+def cmd_push_teleop(args):
+    """Upload self-contained teleop segment dirs to the server + register them
+    with the coordinator (claimable like any other episode)."""
+    src = (args.dir or TELEOP_EPS).rstrip("/")
+    if not os.path.isdir(src):
+        sys.exit(f"no teleop eps dir: {src}")
+    subprocess.run(["ssh", SSH, f"mkdir -p {REMOTE_TELEOP}"], capture_output=True)
+    r = subprocess.run(["rsync", "-a", "--info=stats0", "-e", "ssh",
+                        src + "/", f"{SSH}:{REMOTE_TELEOP}/"], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"[rsync fail] {r.stderr.strip()[:200]}")
+    n = sum(1 for d in os.listdir(src) if os.path.isdir(os.path.join(src, d)))
+    print(f"uploaded {n} teleop ep(s) → {REMOTE_TELEOP}")
+    print(coord(["init"]))   # merge: registers new teleop eps as available
+    # Seed each teleop seg's task as its initial hint → status hinted (claimable
+    # for annotation now; refine the prior-context hint later in the viewer).
+    payload = {}
+    for d in sorted(os.listdir(src)):
+        mp = os.path.join(src, d, "meta.json")
+        if os.path.exists(mp):
+            m = json.load(open(mp))
+            if m.get("uuid"):
+                payload[m["uuid"]] = m.get("task_instruction") or "(teleop segment)"
+    if payload:
+        coord(["set-hint", "--stdin"], stdin=json.dumps(payload))
+        print(f"  seeded {len(payload)} teleop hint(s) → hinted (claimable for annot)")
 
 
 def cmd_push_annot(args):
@@ -722,7 +774,9 @@ def main():
     p.add_argument("--no-viewer", action="store_true"); p.set_defaults(fn=cmd_hint_round)
     p = sub.add_parser("claim-annot"); p.add_argument("--n", type=int, default=5); p.add_argument("--worker", default="local")
     p.add_argument("--outcome", choices=["success", "failure"])
+    p.add_argument("--source", choices=["droid", "teleop"])
     p.set_defaults(fn=cmd_claim_annot)
+    p = sub.add_parser("push-teleop"); p.add_argument("--dir"); p.set_defaults(fn=cmd_push_teleop)
     sub.add_parser("push-annot").set_defaults(fn=cmd_push_annot)
     p = sub.add_parser("pull-annot")
     p.add_argument("--uuid", nargs="*", help="substring match on the sanitized uuid (repeatable)")

@@ -32,6 +32,8 @@ import argparse, fcntl, glob, json, os, sys, time
 SSAA_DIR = os.environ.get("SSAA_DIR", "/localdisk-tmp/ssaa")
 DATA_ROOT = os.environ.get("SSAA_DATA_ROOT",
                            "/localdisk-tmp/datasets/droid_raw/1.0.1")
+TELEOP_ROOT = os.environ.get("SSAA_TELEOP_ROOT",
+                             "/localdisk-tmp/datasets/teleop_playground")
 STATE = os.path.join(SSAA_DIR, "state.json")
 LOCK = os.path.join(SSAA_DIR, "state.lock")
 HINTS = os.path.join(SSAA_DIR, "hints")
@@ -81,7 +83,24 @@ def _scan():
             "rel": rel, "lab": m.get("lab", ""), "outcome": outcome,
             "task": m.get("current_task", ""), "status": "available",
             "hint": None, "claimed_by": None, "claimed_at": None,
-            "annotated": False,
+            "annotated": False, "source": "droid",
+        }
+    # Self-contained teleop episodes (already extracted; own meta.json).
+    for mp in glob.glob(os.path.join(TELEOP_ROOT, "*", "meta.json")):
+        try:
+            m = json.load(open(mp))
+        except Exception:
+            continue
+        uuid = m.get("uuid")
+        epdir = os.path.dirname(mp)
+        if not uuid:
+            continue
+        eps[uuid] = {
+            "rel": os.path.relpath(epdir, TELEOP_ROOT),
+            "lab": "teleop", "outcome": m.get("outcome", "teleop"),
+            "task": m.get("task_instruction", ""), "status": "available",
+            "hint": None, "claimed_by": None, "claimed_at": None,
+            "annotated": False, "source": "teleop",
         }
     return eps
 
@@ -136,11 +155,14 @@ def cmd_claim(args):
                 continue
             if args.outcome and r["outcome"] != args.outcome:
                 continue
+            if args.source and r.get("source", "droid") != args.source:
+                continue
             r["status"] = "hint_claimed" if args.role == "hint" else "annot_claimed"
             r["claimed_by"] = args.worker
             r["claimed_at"] = int(time.time())
             picked.append({"uuid": u, "rel": r["rel"], "outcome": r["outcome"],
-                           "task": r["task"], "hint": r.get("hint")})
+                           "task": r["task"], "hint": r.get("hint"),
+                           "source": r.get("source", "droid")})
     print(json.dumps(picked))
 
 
@@ -230,7 +252,7 @@ def cmd_list(args):
         out = [{"uuid": u, "rel": r["rel"], "outcome": r["outcome"],
                 "status": r["status"], "task": r.get("task", ""),
                 "hint": r.get("hint"), "annotated": r.get("annotated", False),
-                "claimed_by": r.get("claimed_by")}
+                "claimed_by": r.get("claimed_by"), "source": r.get("source", "droid")}
                for u, r in st["episodes"].items()
                if (not args.status or r["status"] == args.status)]
         print(json.dumps(out[:args.limit]))
@@ -305,7 +327,7 @@ def main():
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
     p = sub.add_parser("claim"); p.add_argument("--role", required=True, choices=["hint", "annot"])
     p.add_argument("--n", type=int, default=1); p.add_argument("--outcome", choices=["success", "failure"])
-    p.add_argument("--worker", default="local"); p.set_defaults(fn=cmd_claim)
+    p.add_argument("--worker", default="local"); p.add_argument("--source", choices=["droid", "teleop"]); p.set_defaults(fn=cmd_claim)
     p = sub.add_parser("set-hint"); p.add_argument("--uuid"); p.add_argument("--hint")
     p.add_argument("--stdin", action="store_true"); p.set_defaults(fn=cmd_set_hint)
     p = sub.add_parser("mark-annotated"); p.add_argument("--uuid"); p.add_argument("--stdin", action="store_true"); p.set_defaults(fn=cmd_mark_annotated)

@@ -671,6 +671,19 @@ class VideoCache:
                 logger.info("VideoCache: indexed JPEG dir for %s "
                             "(ext=%d, wrist=%d)", os.path.basename(ep_dir), ne, nw)
                 return True
+        # Path 1.5: self-contained teleop ep — mp4s live in ep_dir (meta-named)
+        if ep_dir and os.path.exists(os.path.join(ep_dir, "meta.json")):
+            try:
+                m = json.load(open(os.path.join(ep_dir, "meta.json")))
+            except Exception:
+                m = {}
+            if m.get("source") == "teleop":
+                ext = os.path.join(ep_dir, m.get("ext_video", "ext.mp4"))
+                wrist = os.path.join(ep_dir, m.get("wrist_video", "wrist.mp4"))
+                self._by_episode_id[episode_id] = {
+                    "ext": self._decode_mp4(ext), "wrist": self._decode_mp4(wrist)}
+                logger.info("VideoCache: teleop ep-local mp4 for %s", episode_id)
+                return True
         # Path 2: in-memory MP4 decode
         ext_mp4, wrist_mp4 = self._resolve_mp4_paths(episode_id)
         if not (ext_mp4 or wrist_mp4):
@@ -945,8 +958,18 @@ def _meta_md(ep: V3Episode) -> str:
         )
     chip = _outcome_chip_html(ep.outcome)
     hint_html = _hint_panel_html(ep.hint)
+    seg_line = ""
+    try:
+        m = json.load(open(os.path.join(ep.ep_dir, "meta.json")))
+        if m.get("source") == "teleop" and m.get("total_segments", 1) > 1:
+            seg_line = (f"\n\n🧩 **Segment {m['segment_idx'] + 1}/{m['total_segments']}** "
+                        f"of `{m.get('source_episode', '?')}`  "
+                        f"(orig frames {m.get('orig_frame_range')}) — "
+                        f"in the hint, note prior context (e.g. *N cubes already stacked*).")
+    except Exception:
+        pass
     return (
-        f"{chip}  &nbsp; **Task:** {ep.task_instruction}\n\n"
+        f"{chip}  &nbsp; **Task:** {ep.task_instruction}{seg_line}\n\n"
         f"{hint_html}\n\n"
         f"**Description:** {ep.description}\n\n"
         f"_{len(ep.keyframes)} kfs  •  imit=true: {n_true}  •  "
@@ -1287,13 +1310,30 @@ def build_ui(episodes: list[V3Episode], port: int,
     by_short: dict[str, V3Episode] = {ep.short_id: ep for ep in episodes}
     overlay_available = any(ep.axis_overlay for ep in episodes)
     hint_editable = bool(hints_path)
+
+    def _is_teleop(ep):
+        try:
+            return json.load(open(os.path.join(ep.ep_dir, "meta.json"))).get("source") == "teleop"
+        except Exception:
+            return False
+    teleop_present = any(_is_teleop(e) for e in episodes)
+    seg_dir = os.path.dirname(episodes[0].ep_dir.rstrip("/"))  # where segments.json is written
     raw_root = os.path.expanduser(
         raw_root or os.environ.get("DROID_RAW_ROOT") or "~/datasets/droid_raw/1.0.1")
 
     def _ep_video(ep: V3Episode, cam: str = "ext"):
-        """(selected_mp4_path_or_None, markdown_with_links) for the raw mirror
-        video. `cam` picks which camera feeds the inline player (ext|wrist)."""
-        ext, wrist = resolve_mp4_paths(raw_root, ep.episode_id)
+        """(selected_mp4_path_or_None, markdown_with_links) for the raw video.
+        `cam` picks which camera feeds the inline player (ext|wrist)."""
+        ext = wrist = None
+        try:                                    # self-contained teleop ep-local mp4
+            m = json.load(open(os.path.join(ep.ep_dir, "meta.json")))
+            if m.get("source") == "teleop":
+                ext = os.path.join(ep.ep_dir, m.get("ext_video", "ext.mp4"))
+                wrist = os.path.join(ep.ep_dir, m.get("wrist_video", "wrist.mp4"))
+        except Exception:
+            pass
+        if not ext:
+            ext, wrist = resolve_mp4_paths(raw_root, ep.episode_id)
         if not (ext or wrist):
             return None, ("_Raw video not in the local mirror "
                           f"(`{raw_root}`) — claim/pull this episode first._")
@@ -1358,6 +1398,18 @@ def build_ui(episodes: list[V3Episode], port: int,
                     hint_default = gr.Button("✓ Default hint", scale=0)
                     hint_exclude = gr.Button("🚫 Mark unusable", scale=0)
                     hint_status = gr.Markdown("")
+
+        if teleop_present:
+            with gr.Accordion("✂️ Segmentation — mark sub-task boundaries (teleop)", open=False):
+                gr.Markdown("Scrub to a frame where one sub-task finishes (e.g. a cube "
+                            "placed) → ➕; repeat; then 💾 writes `segments.json`. "
+                            "Re-extract: `extract_teleop.py --segments-file segments.json`.")
+                seg_box = gr.Textbox(value="", label="boundary frames (sorted)",
+                                     interactive=True)
+                with gr.Row():
+                    seg_add = gr.Button("➕ mark boundary @ current frame", scale=0)
+                    seg_save = gr.Button("💾 Save segments.json", variant="primary", scale=0)
+                    seg_status = gr.Markdown("")
 
         with gr.Row():
             with gr.Column(scale=2):
@@ -1555,6 +1607,36 @@ def build_ui(episodes: list[V3Episode], port: int,
                                outputs=FULL_OUT)
             hint_exclude.click(_do_exclude, inputs=[ep_dropdown, hint_box, overlay_chk],
                                outputs=FULL_OUT)
+
+        if teleop_present:
+            def _parse_bounds(s):
+                return sorted({int(x) for x in str(s).replace(",", " ").split()
+                               if x.strip().lstrip("-").isdigit()})
+
+            def _seg_add(cur, frame_idx):
+                bs = _parse_bounds(cur) + [int(frame_idx)]
+                return ",".join(str(b) for b in sorted(set(bs)))
+
+            def _seg_save(short_id, cur):
+                ep = _resolve_ep(short_id)
+                try:
+                    src = json.load(open(os.path.join(ep.ep_dir, "meta.json"))
+                                    ).get("source_episode") or ep.episode_id
+                except Exception:
+                    src = ep.episode_id
+                path = os.path.join(seg_dir, "segments.json")
+                data = {}
+                if os.path.exists(path):
+                    try:
+                        data = json.load(open(path))
+                    except Exception:
+                        data = {}
+                data[src] = _parse_bounds(cur)
+                json.dump(data, open(path, "w"), indent=2)
+                return f"💾 saved {len(data[src])} boundaries for `{src}` → {path}"
+
+            seg_add.click(_seg_add, inputs=[seg_box, slider], outputs=[seg_box])
+            seg_save.click(_seg_save, inputs=[ep_dropdown, seg_box], outputs=[seg_status])
 
         def _on_slider(short_id, frame_idx, overlay):
             ep = _resolve_ep(short_id)

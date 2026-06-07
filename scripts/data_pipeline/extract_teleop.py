@@ -38,6 +38,29 @@ WRIST_CAM = "left_camera"
 FPS = 6.0
 NEAR_RADIUS = 2
 INTERACTION = {"grasp", "release", "retry"}
+MIN_KF_GAP = 3          # frames @6fps (~0.5s): merge micro-chunks closer than this
+_KF_PRIO = {"begin": 5, "end": 5, "grasp": 4, "release": 4, "retry": 4,
+            "motion": 2, "filler": 1}
+
+
+def _merge_close_keyframes(kfs, min_gap):
+    """Global NMS: drop keyframes closer than min_gap to the kept one, keeping
+    the higher-priority type (begin/end/grasp/release > motion > filler)."""
+    if len(kfs) <= 2:
+        return kfs
+    kept = [kfs[0]]
+    for k in kfs[1:]:
+        if k.type == "end":                     # always keep the end bracket
+            kept.append(k)
+            continue
+        prev = kept[-1]
+        if (k.t - prev.t) < min_gap and prev.type != "begin":
+            if _KF_PRIO.get(k.type, 0) > _KF_PRIO.get(prev.type, 0):
+                kept[-1] = k                     # replace lower-priority neighbour
+            # else: drop k (keep prev)
+        else:
+            kept.append(k)
+    return kept
 
 
 def _active_arm(f) -> str:
@@ -80,9 +103,17 @@ def _mp4_frame(cap, idx: int):
     return img if ok else None
 
 
-def _ranges(n: int, boundaries: list[int]) -> list[tuple[int, int]]:
-    bs = [0] + sorted({int(b) for b in boundaries if 0 < int(b) < n}) + [n]
-    return [(bs[i], bs[i + 1]) for i in range(len(bs) - 1)]
+def _ranges(n: int, boundaries: list[int], min_seg: int = 6) -> list[tuple[int, int]]:
+    """Boundaries → [start,end) ranges, dropping cuts that would make a segment
+    shorter than min_seg frames (e.g. a boundary placed ≈ the episode end)."""
+    pts = [0]
+    for b in sorted({int(x) for x in boundaries if 0 < int(x) < n}):
+        if b - pts[-1] >= min_seg:
+            pts.append(b)
+    if len(pts) > 1 and n - pts[-1] < min_seg:
+        pts.pop()                       # merge a too-short tail into previous seg
+    pts.append(n)
+    return [(pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
 
 
 def extract(h5_path: str, video_dir: str, ep_name: str, out_root: str,
@@ -123,6 +154,7 @@ def extract(h5_path: str, video_dir: str, ep_name: str, out_root: str,
             kfs[0].type = "begin"
         if kfs and kfs[-1].t == seg_n - 1:
             kfs[-1].type = "end"
+        kfs = _merge_close_keyframes(kfs, MIN_KF_GAP)   # drop 1-frame micro-chunks
 
         uuid = f"teleop_playground_{ep_name}" + (f"_seg{si:02d}" if multi else "")
         ep_dir = os.path.join(out_root, uuid)

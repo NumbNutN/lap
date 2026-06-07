@@ -73,7 +73,7 @@ get_pose_delta(idx1, idx2) -> {
     delta_ee:    {forward, left, up}  # cm, wrist camera frame at idx1
     delta_rot_world: "≈X° pitch+Y° roll"
     delta_rot_ee:    "≈X° pitch_ee+Y° yaw_ee"
-    gripper: "closed(0.80) → closed(0.91)"   # open/closed/partial at both ends
+    gripper: "closing (62% → 49% open)"   # trend over the span + % open (0=closed,100=open); "holding (~X% open)" if ~unchanged
     n_frames: int
     interaction_events_in_range: [{frame_idx, type}]   # grasp/release inside
     gap_to_grasp:   {target_frame, delta_robot, delta_ee, ...} | None
@@ -215,11 +215,12 @@ clip the cup").
 - **Imperative, first-person**: write `A` as the move you make from the
   current view ("descend ~27 cm to the rim and close"), not a past-tense
   recount of the demo ("the arm moved…"). You own the action, not narrate it.
-- **Grip from the tool, not the tag**: take open/close from `gripper` in
-  `get_pose_delta` (state at both span ends). A keyframe's `grasp`/`release`
-  tag marks where the event *begins* — the gripper may not have moved yet.
-  Describe it qualitatively ("close the fingers", "release", "half-open") —
-  never recite the raw 0–1 value.
+- **Grip from the tool, not the tag**: `get_pose_delta`'s `gripper` gives the
+  TREND over the span — `opening`/`closing`/`holding` with % open (0=closed,
+  100=open). Describe the action by that trend ("close the fingers to grasp",
+  "release", "keep the grip"); the `grasp`/`release` tag only marks where the
+  event *begins*. Never recite the raw 0–1 value; a half-open idle pose that
+  isn't changing is **holding**, not a grasp.
 - **Frame follows the view that grounds the action** (not the phase type):
   use the frame of the camera that actually shows the gripper/object now.
   Attitude/rotation reads naturally in the **wrist** frame (the object's

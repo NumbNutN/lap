@@ -106,6 +106,26 @@ def _load_episode_state(ep_path: str) -> dict:
     with open(meta_path) as f:
         meta = json.load(f)
 
+    # Self-contained teleop episodes carry their own DROID-shaped trajectory.h5
+    # + ep-local mp4s, so read them in place (no DROID_RAW_ROOT / serials).
+    local_h5 = os.path.join(ep_path, "trajectory.h5")
+    if meta.get("source") == "teleop" and os.path.exists(local_h5):
+        import h5py
+        with h5py.File(local_h5, "r") as f:
+            ee_pose = f["observation/robot_state/cartesian_position"][:].astype(np.float64)
+            gripper = f["observation/robot_state/gripper_position"][:].astype(np.float64)
+        state = {
+            "meta": meta,
+            "ee_pose": ee_pose,
+            "gripper_width": gripper,
+            "T_ee_wrist": None,
+            "ext_mp4": os.path.join(ep_path, meta.get("ext_video", "ext.mp4")),
+            "wrist_mp4": os.path.join(ep_path, meta.get("wrist_video", "wrist.mp4")),
+            "n_frames": ee_pose.shape[0],
+        }
+        _EP_CACHE[ep_path] = state
+        return state
+
     # ee_pose, T_world_wrist live in the source h5; meta.json caches what
     # we needed for v2. For v3 we need full ee_pose array, so we read h5.
     episode_id = meta["episode_id"]

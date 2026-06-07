@@ -27,6 +27,8 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
+LAP_ROOT = os.path.dirname(SCRIPTS)                       # policy/lap
+REPO = os.path.dirname(os.path.dirname(LAP_ROOT))         # RoboTwin (repo root)
 if SCRIPTS not in sys.path:
     sys.path.insert(0, SCRIPTS)
 from annotate_droid.keyframe import detect_keyframes  # noqa: E402
@@ -186,8 +188,9 @@ def extract(h5_path: str, video_dir: str, ep_name: str, out_root: str,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data-root", default="data/teleop_playground/teleop_playground")
-    ap.add_argument("--out", default="policy/lap/local_data/teleop_eps")
+    ap.add_argument("--data-root",
+                    default=os.path.join(REPO, "data/teleop_playground/teleop_playground"))
+    ap.add_argument("--out", default=os.path.join(LAP_ROOT, "local_data/teleop_eps"))
     ap.add_argument("--episodes", nargs="*", help="episode names; default all")
     ap.add_argument("--boundaries", help="comma frames to split at (single episode), e.g. 350,700")
     ap.add_argument("--segments-file", help="json {episode_name: [boundary_frames]}")

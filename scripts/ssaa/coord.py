@@ -101,6 +101,11 @@ def _scan():
             "task": m.get("task_instruction", ""), "status": "available",
             "hint": None, "claimed_by": None, "claimed_at": None,
             "annotated": False, "source": "teleop",
+            # segment provenance recorded server-side (group/re-stitch by source)
+            "source_episode": m.get("source_episode"),
+            "segment_idx": m.get("segment_idx"),
+            "total_segments": m.get("total_segments"),
+            "orig_frame_range": m.get("orig_frame_range"),
         }
     return eps
 
@@ -252,7 +257,9 @@ def cmd_list(args):
         out = [{"uuid": u, "rel": r["rel"], "outcome": r["outcome"],
                 "status": r["status"], "task": r.get("task", ""),
                 "hint": r.get("hint"), "annotated": r.get("annotated", False),
-                "claimed_by": r.get("claimed_by"), "source": r.get("source", "droid")}
+                "claimed_by": r.get("claimed_by"), "source": r.get("source", "droid"),
+                "source_episode": r.get("source_episode"), "segment_idx": r.get("segment_idx"),
+                "total_segments": r.get("total_segments")}
                for u, r in st["episodes"].items()
                if (not args.status or r["status"] == args.status)]
         print(json.dumps(out[:args.limit]))
@@ -320,6 +327,17 @@ def cmd_reset_hint(args):
         print(json.dumps({"reset": n, "of": len(uuids)}))
 
 
+def cmd_drop(args):
+    """Remove episodes of a given source from state.json (e.g. stale teleop
+    test segments). Files on disk are NOT touched. Re-add via `init` (merge)."""
+    with _Locked() as st:
+        before = len(st["episodes"])
+        st["episodes"] = {u: r for u, r in st["episodes"].items()
+                          if r.get("source", "droid") != args.source}
+        print(json.dumps({"dropped": before - len(st["episodes"]),
+                          "left": len(st["episodes"])}))
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -339,6 +357,7 @@ def main():
     p.add_argument("--stdin", action="store_true"); p.add_argument("--undo", action="store_true"); p.set_defaults(fn=cmd_exclude)
     p = sub.add_parser("reset-hint"); p.add_argument("--uuid"); p.add_argument("--stdin", action="store_true")
     p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_reset_hint)
+    p = sub.add_parser("drop"); p.add_argument("--source", required=True, choices=["droid", "teleop"]); p.set_defaults(fn=cmd_drop)
     args = ap.parse_args()
     args.fn(args)
 

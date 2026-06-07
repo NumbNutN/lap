@@ -6,7 +6,7 @@ numpy<2.0
 h5py
 pillow
 opencv-python
-pexpect          # one-time SSH ControlMaster password login (host rotates pw)
+pexpect          # one-time SSH ControlMaster password login
 # ssaa_client.py and audit_v3.py are stdlib-only; system `ssh`/`rsync`/`scp`
 # (OpenSSH) must also be installed. The viewer (view_droid_v3.py, human hinting
 # only) additionally needs `gradio` and `matplotlib` — not required to annotate.

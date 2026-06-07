@@ -11,9 +11,11 @@ Why rule-based (not VLM-picked):
 
 Inputs (per episode):
     gripper_width: np.ndarray[float], shape (T,)
-        Continuous gripper width. For Franka Panda DROID, 0.0 ≈ closed,
-        ~0.08 m ≈ fully open. We normalise into {open, partial, closed}
-        with hysteresis to suppress jitter.
+        Gripper command 0..1 (0=open, 1=closed). Unified via %open=(1-g)*100:
+        grasp/release are detected as %open TRENDS (sustained runs), and the
+        discrete {open,partial,closed} label is DERIVED from %open (display
+        only). Works for DROID and sim teleop alike (robust to thin-object
+        grips where %open only falls to ~50).
     ee_pos:        np.ndarray[float], shape (T, 3)
         End-effector translation (world frame). Used only for motion-phase
         change detection (R4), not for primary phase boundaries.
@@ -26,9 +28,9 @@ Output:
 
 Rule taxonomy (each function below):
 
-    R1  gripper_state(width)              → {open, partial, closed}
-    R2  gripper_transitions(width)        → primary phase boundaries
-    R3  detect_grasp_retries(transitions) → close→open→close within 1.5s
+    R1  gripper_state(width)              → {open, partial, closed} (from %open)
+    R2  gripper_events(width)             → grasp/release from %open trends
+    R3  detect_grasp_retries(events)      → grasp→release→grasp within 1.5s
     R4  detect_motion_changes(ee_pos)     → EE-velocity direction shift
     R5  boundary keyframes                → first + last frame
     R6  fill_long_gaps(keyframes)         → cap stage length at max_gap
@@ -63,9 +65,14 @@ import numpy as np
 # Earlier we had this inverted (assuming Franka physical width where
 # 0 ≈ closed and 0.08 ≈ open) which gave ALL ep0 keyframe types wrong
 # direction. See cot_annotation discussion 2026-05-24.
-GRIP_OPEN_MAX = 0.15      # gripper_position < this  → "open"
-GRIP_CLOSED_MIN = 0.50    # gripper_position > this  → "closed"
-                          # in between → "partial" (transitioning / holding object)
+# Unified gripper semantics: %open = (1 - gripper)*100  (0=closed, 100=open).
+# Single source of truth — state labels AND grasp/release detection both derive
+# from %open, so DROID (command ~0..0.81) and sim teleop share one convention.
+GRIP_OPEN_MIN_PCT = 80    # %open > this → "open"
+GRIP_CLOSED_MAX_PCT = 20  # %open < this → "closed"  (else "partial")
+GRIP_RUN_DELTA_PCT = 20   # a closing/opening RUN must move %open by ≥ this to
+                          # count as grasp/release (robust to a thin object where
+                          # %open only drops to ~50 and never hits absolute closed)
 
 # Hysteresis: how many consecutive frames must a new state hold before we
 # accept it as a transition. Suppresses bounce/contact-pulse noise.
@@ -122,10 +129,13 @@ class Keyframe:
 
 
 def gripper_state(width: float) -> GripperState:
-    if width > GRIP_CLOSED_MIN:
-        return "closed"
-    if width < GRIP_OPEN_MAX:
+    """Discrete label DERIVED from %open (display/reference only; detection uses
+    the %open trend, not this absolute label)."""
+    pct = (1.0 - float(width)) * 100.0
+    if pct > GRIP_OPEN_MIN_PCT:
         return "open"
+    if pct < GRIP_CLOSED_MAX_PCT:
+        return "closed"
     return "partial"
 
 
@@ -134,34 +144,35 @@ def gripper_state(width: float) -> GripperState:
 # ---------------------------------------------------------------------------
 
 
-def gripper_transitions(
-    gripper_width: np.ndarray,
-    persist_frames: int = GRIP_PERSIST_FRAMES,
-) -> list[tuple[int, GripperState, GripperState]]:
-    """Return a list of (frame_idx, from_state, to_state) transitions.
+def gripper_events(gripper_width: np.ndarray) -> list[tuple[int, str]]:
+    """Detect grasp/release as %open TRENDS (runs), anchored at the run onset.
 
-    Uses persistence-based hysteresis: a new state is only accepted if it
-    holds for `persist_frames` consecutive frames. Without this, finger
-    contact pulses on closure create spurious transitions.
+    %open = (1-gripper)*100. A sustained closing run (%open drops by ≥
+    GRIP_RUN_DELTA_PCT) → 'grasp'; an opening run → 'release'. Robust to
+    gripping a thin object (where %open only falls to ~50 and never reaches an
+    absolute 'closed'), unlike the old open→closed state machine.
+
+    Returns [(onset_frame, 'grasp'|'release'), ...] in time order.
     """
-    states = [gripper_state(float(w)) for w in gripper_width]
-    if len(states) < 2:
-        return []
-    transitions: list[tuple[int, GripperState, GripperState]] = []
-    last_stable: GripperState = states[0]
-    t = 1
-    n = len(states)
-    while t < n:
-        if states[t] != last_stable:
-            window_end = min(t + persist_frames, n)
-            window = states[t:window_end]
-            if len(window) >= persist_frames and all(s == states[t] for s in window):
-                transitions.append((t, last_stable, states[t]))
-                last_stable = states[t]
-                t = window_end
-                continue
-        t += 1
-    return transitions
+    pct = (1.0 - np.asarray(gripper_width, dtype=np.float64)) * 100.0
+    n = len(pct)
+    events: list[tuple[int, str]] = []
+    i = 1
+    while i < n:
+        d = pct[i] - pct[i - 1]
+        if abs(d) < 1.0:                       # flat → no run starts here
+            i += 1
+            continue
+        direction = 1 if d > 0 else -1
+        start = i - 1
+        j = i
+        while j < n and (pct[j] - pct[j - 1]) * direction >= -2.0:  # tolerate tiny noise
+            j += 1
+        total = pct[j - 1] - pct[start]
+        if abs(total) >= GRIP_RUN_DELTA_PCT:
+            events.append((int(start), "release" if total > 0 else "grasp"))
+        i = max(j, i + 1)
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -194,27 +205,19 @@ def refine_to_motion_start(
 
 
 def detect_grasp_retries(
-    transitions: list[tuple[int, GripperState, GripperState]],
+    events: list[tuple[int, str]],
     fps: float,
 ) -> list[tuple[int, int, int]]:
-    """Detect close → open → close patterns within RETRY_WINDOW_S.
-
-    Returns list of (t_first_close, t_open, t_retry_close) tuples. The
-    retry start (t_retry_close) becomes a keyframe; the failure cue
-    (t_open) flagged as the "previous attempt failed" context.
-    """
+    """grasp → release → grasp within RETRY_WINDOW_S = a failed-grasp retry.
+    Returns (t_first_grasp, t_release, t_retry_grasp); the retry grasp becomes
+    the keyframe, the first grasp is flagged as the failed attempt."""
     retries: list[tuple[int, int, int]] = []
     window_frames = int(RETRY_WINDOW_S * fps)
-    for i in range(2, len(transitions)):
-        t_a, s_a_from, s_a_to = transitions[i - 2]
-        t_b, s_b_from, s_b_to = transitions[i - 1]
-        t_c, s_c_from, s_c_to = transitions[i]
-        # Pattern: ?→closed, closed→open, open→closed within window
-        if (s_a_to == "closed"
-                and s_b_from == "closed" and s_b_to == "open"
-                and s_c_from == "open" and s_c_to == "closed"
-                and (t_c - t_a) <= window_frames):
-            retries.append((t_a, t_b, t_c))
+    for i in range(2, len(events)):
+        (ta, ka), (tb, kb), (tc, kc) = events[i - 2], events[i - 1], events[i]
+        if ka == "grasp" and kb == "release" and kc == "grasp" \
+                and (tc - ta) <= window_frames:
+            retries.append((ta, tb, tc))
     return retries
 
 
@@ -321,13 +324,13 @@ def detect_keyframes(
     if T == 0:
         return []
 
-    # R2 — primary signal
-    transitions = gripper_transitions(gripper_width)
+    # R2 — grasp/release from %open trends (anchored at run onset already)
+    events = gripper_events(gripper_width)
 
-    # R3 — retries
-    retries = detect_grasp_retries(transitions, fps=fps)
-    retry_starts = {t_c for (_, _, t_c) in retries}
-    retry_failed_grasps = {t_a for (t_a, _, _) in retries}
+    # R3 — retries (grasp→release→grasp)
+    retries = detect_grasp_retries(events, fps=fps)
+    retry_starts = {tc for (_, _, tc) in retries}
+    retry_failed_grasps = {ta for (ta, _, _) in retries}
 
     # R4 — motion changes (optional)
     motion_changes: list[tuple[int, float]] = []
@@ -337,22 +340,10 @@ def detect_keyframes(
     # R5 — boundary
     raw_keyframes: dict[int, KeyframeType] = {0: "begin", T - 1: "end"}
 
-    # Anchor grasp/release keyframes at the START of the gripper motion,
-    # not the END of the transition (state-based detection's natural
-    # output). Matches human intuition that "f60 = grasp" means the
-    # moment fingers first begin to close.
-    refined_grasp_releases: dict[int, str] = {}
-    for t, _, to_state in transitions:
-        refined_t = refine_to_motion_start(gripper_width, t)
-        if t in retry_starts:
-            refined_grasp_releases[refined_t] = "retry"
-        elif to_state == "closed":
-            refined_grasp_releases[refined_t] = "grasp"
-        elif to_state == "open":
-            refined_grasp_releases[refined_t] = "release"
-        else:
-            refined_grasp_releases.setdefault(refined_t, "motion")
-    raw_keyframes.update(refined_grasp_releases)
+    for start, kind in events:
+        if start in (0, T - 1):                # never override begin/end
+            continue
+        raw_keyframes[start] = "retry" if start in retry_starts else kind
 
     for t, _cs in motion_changes:
         raw_keyframes.setdefault(t, "motion")
